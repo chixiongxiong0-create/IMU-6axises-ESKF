@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(imu_attitude C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+enable_testing()
+add_executable(test_types tests/test_types.c)
+target_include_directories(test_types PRIVATE include tests)
+if(MSVC)
+  target_compile_options(test_types PRIVATE /W4 /WX)
+else()
+  target_compile_options(test_types PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME types COMMAND test_types)

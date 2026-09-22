@@ -3,7 +3,8 @@
 #include <math.h>
 #include <string.h>
 
-#define NANOSECONDS_PER_SECOND 1000000000.0
+#define NANOSECONDS_PER_SECOND UINT64_C(1000000000)
+#define SECONDS_PER_NANOSECOND 1.0e-9f
 
 static bool finite_nonnegative(float value)
 {
@@ -74,6 +75,23 @@ static bool vector_finite(imu_vec3f_t value)
     return isfinite(value.x) && isfinite(value.y) && isfinite(value.z);
 }
 
+static bool sample_floats_finite(const imu_sample_t *sample)
+{
+    unsigned axis;
+
+    if (!isfinite(sample->accel_temperature_c)) {
+        return false;
+    }
+    for (axis = 0U; axis < IMU_AXIS_COUNT; ++axis) {
+        if (!isfinite(sample->gyro_rad_s[axis]) ||
+            !isfinite(sample->gyro_temperature_c[axis]) ||
+            !isfinite(sample->accel_m_s2[axis])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static float vector_norm(imu_vec3f_t value)
 {
     return sqrtf(value.x * value.x + value.y * value.y + value.z * value.z);
@@ -115,6 +133,15 @@ static float clamp01(float value)
         return 1.0f;
     }
     return value;
+}
+
+static float elapsed_ns_to_seconds(uint64_t elapsed_ns)
+{
+    const uint64_t whole_seconds = elapsed_ns / NANOSECONDS_PER_SECOND;
+    const uint64_t remainder_ns = elapsed_ns % NANOSECONDS_PER_SECOND;
+
+    return (float)whole_seconds +
+           (float)remainder_ns * SECONDS_PER_NANOSECOND;
 }
 
 static bool window_statistics(const imu_motion_quality_t *quality,
@@ -213,6 +240,9 @@ bool imu_motion_quality_update(imu_motion_quality_t *quality,
         quality->window_length != config->quality_window_samples) {
         return false;
     }
+    if (!sample_floats_finite(sample)) {
+        return false;
+    }
     accel = sample_accel(sample);
     gyro = sample_gyro(sample);
     if (!vector_finite(accel) || !vector_finite(gyro)) {
@@ -225,7 +255,7 @@ bool imu_motion_quality_update(imu_motion_quality_t *quality,
             return false;
         }
         elapsed_ns = sample->timestamp_ns - quality->last_timestamp_ns;
-        dt_s = (float)((double)elapsed_ns / NANOSECONDS_PER_SECOND);
+        dt_s = elapsed_ns_to_seconds(elapsed_ns);
     } else {
         dt_s = config->nominal_dt_s;
     }

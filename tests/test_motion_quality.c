@@ -324,6 +324,36 @@ static void test_nonfinite_and_time_errors_are_transactional(void)
     assert_update_rejected_without_mutation(&quality, &config, &sample, 0.0f);
 }
 
+/* Catches treating gyro temperatures as irrelevant payload even though every
+ * external numeric field must be finite before state mutation. */
+static void test_nonfinite_gyro_temperature_is_transactional(void)
+{
+    const imu_config_t config = quality_config();
+    imu_motion_quality_t quality;
+    imu_sample_t sample;
+
+    TEST_ASSERT(imu_motion_quality_init(&quality, &config));
+    warm_stable(&quality, &config, 3U);
+    sample = sample_at(3U);
+    sample.gyro_temperature_c[1] = NAN;
+    assert_update_rejected_without_mutation(&quality, &config, &sample, 0.0f);
+}
+
+/* Catches accepting a nonfinite accelerometer temperature and advancing the
+ * quality window, timestamp, and dwell counters. */
+static void test_nonfinite_accel_temperature_is_transactional(void)
+{
+    const imu_config_t config = quality_config();
+    imu_motion_quality_t quality;
+    imu_sample_t sample;
+
+    TEST_ASSERT(imu_motion_quality_init(&quality, &config));
+    warm_stable(&quality, &config, 3U);
+    sample = sample_at(3U);
+    sample.accel_temperature_c = INFINITY;
+    assert_update_rejected_without_mutation(&quality, &config, &sample, 0.0f);
+}
+
 /* Catches finite external values whose product overflows during slew-rate
  * calculation and is then silently hidden by clamping. */
 static void test_derived_slew_overflow_is_transactional(void)
@@ -355,6 +385,8 @@ int main(void)
     test_maximum_window_and_counter_saturation();
     test_large_timestamps_preserve_dt_resolution();
     test_nonfinite_and_time_errors_are_transactional();
+    test_nonfinite_gyro_temperature_is_transactional();
+    test_nonfinite_accel_temperature_is_transactional();
     test_derived_slew_overflow_is_transactional();
     return test_summary();
 }

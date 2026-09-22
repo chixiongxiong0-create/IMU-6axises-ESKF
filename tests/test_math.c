@@ -66,15 +66,26 @@ static void test_guarded_math(void)
     TEST_ASSERT(imu_mat6_multiply(six, rhs, six));
     TEST_ASSERT_NEAR(six[0][5], 7, 0);
     TEST_ASSERT_NEAR(six[5][0], 3, 0);
-    imu_mat6_transpose(six, six);
+    TEST_ASSERT(imu_mat6_transpose(six, six));
     TEST_ASSERT_NEAR(six[0][5], 3, 0);
     TEST_ASSERT_NEAR(six[5][0], 7, 0);
-    imu_mat6_symmetrize(six);
+    TEST_ASSERT(imu_mat6_symmetrize(six));
     TEST_ASSERT_NEAR(six[0][5], 5, 0);
     TEST_ASSERT_NEAR(six[5][0], 5, 0);
     memcpy(saved_six, six, sizeof(six));
     rhs[3][4] = NAN;
     TEST_ASSERT(!imu_mat6_multiply(six, rhs, six));
+    TEST_ASSERT(memcmp(saved_six, six, sizeof(six)) == 0);
+
+    memcpy(rhs, six, sizeof(rhs));
+    rhs[2][4] = NAN;
+    memcpy(saved_six, six, sizeof(saved_six));
+    TEST_ASSERT(!imu_mat6_transpose(rhs, six));
+    TEST_ASSERT(memcmp(saved_six, six, sizeof(six)) == 0);
+
+    memcpy(six, rhs, sizeof(six));
+    memcpy(saved_six, six, sizeof(saved_six));
+    TEST_ASSERT(!imu_mat6_symmetrize(six));
     TEST_ASSERT(memcmp(saved_six, six, sizeof(six)) == 0);
 }
 
@@ -108,10 +119,10 @@ int main(void)
     TEST_ASSERT_NEAR(product[1][2], -1.0f, 1e-6f);
     imu_mat6_identity(identity);
     p[0][1] = 2.0f;
-    imu_mat6_transpose(p, pt);
+    TEST_ASSERT(imu_mat6_transpose(p, pt));
     TEST_ASSERT(imu_mat6_multiply(identity, pt, p));
     TEST_ASSERT_NEAR(p[1][0], 2.0f, 0.0f);
-    imu_mat6_symmetrize(p);
+    TEST_ASSERT(imu_mat6_symmetrize(p));
     TEST_ASSERT_NEAR(p[0][1], p[1][0], 0.0f);
 
     TEST_ASSERT(imu_quat_rotate(q, forward, &rotated));

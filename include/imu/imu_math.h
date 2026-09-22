@@ -13,9 +13,9 @@ void imu_mat6_identity(float out[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM]);
 bool imu_mat6_multiply(float a[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM],
                        float b[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM],
                        float out[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM]);
-void imu_mat6_transpose(float in[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM],
+bool imu_mat6_transpose(float in[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM],
                         float out[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM]);
-void imu_mat6_symmetrize(float in_out[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM]);
+bool imu_mat6_symmetrize(float in_out[IMU_ERROR_STATE_DIM][IMU_ERROR_STATE_DIM]);
 imu_quatf_t imu_quat_multiply(imu_quatf_t a, imu_quatf_t b);
 imu_quatf_t imu_quat_conjugate(imu_quatf_t q);
 float imu_quat_norm(imu_quatf_t q);

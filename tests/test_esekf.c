@@ -409,6 +409,43 @@ static void test_zero_rate(void)
     TEST_ASSERT(memcmp(&f, &saved_, sizeof(f)) == 0); \
 } while (0)
 
+/* At the smallest float scale, averaging raw entries first erases every
+ * off-diagonal. The true correlation is 2I-11', with eigenvalues -4 and 2. */
+static void test_subnormal_indefinite_covariance(void)
+{
+    imu_config_t c = config();
+    imu_esekf_t f = identity_filter(&c);
+    const float smallest = nextafterf(0.0f, 1.0f); /* C99 FLT_TRUE_MIN. */
+    const uint32_t flags[3] = {1, 1, 1};
+    imu_output_t out, saved_out;
+    unsigned i, j;
+    TEST_ASSERT(smallest > 0 && smallest < FLT_MIN);
+    for (i = 0; i < 6; ++i)
+        for (j = 0; j < 6; ++j)
+            f.P[i][j] = i == j ? smallest : -smallest;
+    TEST_ASSERT_NEAR(minimum_correlation_eigenvalue(&f), -4, 1e-12);
+    TEST_ASSERT(!imu_esekf_covariance_valid(&f));
+    ASSERT_UNCHANGED_CALL(imu_esekf_predict(&f, &c, ((imu_vec3f_t){0, 0, 0}), 0.01f),
+                          IMU_STATUS_NUMERICAL_FAULT);
+    /* Restore the fixture after a failed rollback assertion in a RED run. */
+    for (i = 0; i < 6; ++i)
+        for (j = 0; j < 6; ++j)
+            f.P[i][j] = i == j ? smallest : -smallest;
+    ASSERT_UNCHANGED_CALL(imu_esekf_update_gravity(&f, &c,
+                          ((imu_vec3f_t){0, 0, -9.8f}), 0),
+                          IMU_STATUS_NUMERICAL_FAULT);
+    ASSERT_UNCHANGED_CALL(imu_esekf_update_gravity(&f, &c,
+                          ((imu_vec3f_t){0, 0, -9.8f}), 1),
+                          IMU_STATUS_NUMERICAL_FAULT);
+    ASSERT_UNCHANGED_CALL(imu_esekf_update_zero_rate(&f, &c,
+                          ((imu_vec3f_t){0, 0, 0}), flags),
+                          IMU_STATUS_NUMERICAL_FAULT);
+    memset(&out, 0x5a, sizeof(out));
+    memcpy(&saved_out, &out, sizeof(out));
+    TEST_ASSERT(imu_esekf_get_output(&f, &out) == IMU_STATUS_NUMERICAL_FAULT);
+    TEST_ASSERT(memcmp(&out, &saved_out, sizeof(out)) == 0);
+}
+
 /* All failing calls protect q, bias, P, rate and lifecycle byte-for-byte,
  * including failures reached only after intermediate arithmetic overflow. */
 static void test_update_rollback(void)
@@ -519,6 +556,7 @@ int main(int argc, char **argv)
     if (argc == 1 || strcmp(argv[1], "psd") == 0) {
         test_indefinite_covariance();
         test_roundoff_covariance();
+        test_subnormal_indefinite_covariance();
     }
     if (argc == 1 || strcmp(argv[1], "propagation") == 0) {
         test_propagation();

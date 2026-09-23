@@ -54,9 +54,15 @@ static int covariance_status(const imu_esekf_t *f)
     for (i = 0; i < 6; ++i) {
         for (j = 0; j < 6; ++j) {
             const float p = f->P[i][j], q = f->P[j][i];
+            const float smaller = fminf(scale[i], scale[j]);
+            const float larger = fmaxf(scale[i], scale[j]);
             if (!isfinite(p) || !isfinite(q) ||
                 fabsf(p-q) > 1e-5f*fmaxf(fabsf(p), fabsf(q))) return -1;
-            a[i][j] = i == j ? 1.0f : (0.5f*p+0.5f*q)/scale[i]/scale[j];
+            /* Normalize before averaging: halving raw subnormal entries can
+             * erase material correlations. Divide by the smaller scale first
+             * to avoid premature underflow when the state scales differ. */
+            a[i][j] = i == j ? 1.0f :
+                0.5f*(p/smaller/larger) + 0.5f*(q/smaller/larger);
         }
     }
     if (covariance_cholesky(a, 0, COVARIANCE_PIVOT_MARGIN)) return 0;

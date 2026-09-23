@@ -72,8 +72,19 @@ else()
 endif()
 add_test(NAME esekf COMMAND test_esekf)
 
+add_executable(test_complementary tests/test_complementary.c src/imu_math.c
+  src/imu_complementary.c)
+target_include_directories(test_complementary PRIVATE include tests)
+target_link_libraries(test_complementary PRIVATE imu_platform_math)
+if(MSVC)
+  target_compile_options(test_complementary PRIVATE /W4 /WX)
+else()
+  target_compile_options(test_complementary PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME complementary COMMAND test_complementary)
+
 add_library(imu STATIC src/imu.c src/imu_math.c src/imu_calibration.c
-  src/imu_biquad.c src/imu_motion_quality.c src/imu_esekf.c)
+  src/imu_biquad.c src/imu_motion_quality.c src/imu_esekf.c src/imu_complementary.c)
 target_include_directories(imu PUBLIC include)
 target_link_libraries(imu PUBLIC imu_platform_math)
 add_executable(test_imu tests/test_imu.c)

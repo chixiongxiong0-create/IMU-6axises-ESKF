@@ -10,14 +10,20 @@
 /* Frozen before the first estimator scenario run. Radians and seconds. */
 #define LIMITS 0.05236,0.05236,0.174533,0.034907,4.0,0.349066,0.08,100.0
 const imu_scenario_t imu_scenarios[]={
-    {"static_arbitrary",LIMITS},{"compound_rotation",LIMITS},
-    {"boundary_300_dps",LIMITS},{"linear_acceleration",LIMITS},
-    {"sustained_turn",LIMITS},{"broadband_vibration",LIMITS},
-    {"shock",LIMITS},{"bias_step",LIMITS},
-    {"accel_dropout",LIMITS},{"recovery",LIMITS},
-    {"combined_vibration_bias",LIMITS}
+    {"static_arbitrary",LIMITS,0},{"compound_rotation",LIMITS,0},
+    {"boundary_300_dps",LIMITS,0},{"linear_acceleration",LIMITS,4},
+    {"sustained_turn",LIMITS,8},{"broadband_vibration",LIMITS,8},
+    {"shock",LIMITS,3.02},{"bias_step",LIMITS,4},
+    {"accel_dropout",LIMITS,8},{"recovery",LIMITS,8},
+    {"combined_vibration_bias",LIMITS,8}
 };
 const unsigned imu_scenario_count=sizeof imu_scenarios/sizeof imu_scenarios[0];
+void imu_recovery_init(imu_recovery_t *r,double disturbance_end_s)
+{ r->start_s=r->last_bad_s=disturbance_end_s; }
+void imu_recovery_observe(imu_recovery_t *r,double time_s,double tilt_error_rad)
+{ if(time_s>=r->start_s && tilt_error_rad>0.034907)r->last_bad_s=time_s; }
+double imu_recovery_result(const imu_recovery_t *r,double final_time_s)
+{ return r->last_bad_s>final_time_s-0.5?INFINITY:r->last_bad_s-r->start_s; }
 static double wrap(double a) { return atan2(sin(a),cos(a)); }
 static double angle(imu_quatf_t a,imu_quatf_t b)
 {
@@ -77,15 +83,17 @@ static double gravity_nis(const imu_esekf_t *e,const imu_config_t *c,
     for(i=0;i<3;++i) nis+=res[i]*a[i][3];
     return nis;
 }
-bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
+bool imu_run_scenario_trace(unsigned scenario,uint32_t seed,imu_metrics_t m[2],FILE *trace)
 {
     imu_sim_t sim; imu_sim_config_t sc; imu_config_t c;
     imu_t es; imu_complementary_t cf; imu_output_t out[2];
     imu_quatf_t truth,previous_truth={1,0,0,0},previous[2];
-    imu_vec3f_t bias; double last_bad[2]={8,8}; unsigned i,k,j;
+    imu_quatf_t diagnostic_gyro={1,0,0,0};
+    imu_vec3f_t bias; imu_recovery_t recovery[2]; unsigned i,k,j;
     imu_calibration_t cal; clock_t ticks[2]={0,0};
     if(scenario>=imu_scenario_count || !m) return false;
     memset(m,0,2*sizeof *m); memset(&cal,0,sizeof cal);
+    for(k=0;k<2;++k)imu_recovery_init(&recovery[k],imu_scenarios[scenario].disturbance_end_s);
     cal.version=IMU_CALIBRATION_VERSION; cal.valid=cal.checksum_valid=true;
     cal.temperature_min_c=-40;cal.temperature_max_c=85;
     for(i=0;i<3;++i) cal.gyro_scale_alignment[i][i]=cal.accel_scale_alignment[i][i]=cal.body_rotation[i][i]=1;
@@ -102,6 +110,8 @@ bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
     if(!imu_sim_init(&sim,&sc) || !imu_init(&es,&c,&cal) ||
        imu_complementary_init(&cf,&c,c.initial_q_nb,(imu_vec3f_t){0,0,0})!=IMU_STATUS_OK) return false;
     previous[0]=previous[1]=sc.initial_q;
+    diagnostic_gyro=sc.initial_q;
+    if(trace)fprintf(trace,"time_s,quaternion_error_rad,roll_error_rad,pitch_error_rad,yaw_relative_error_rad,accel_weight,mode,bias_x,bias_y,bias_z,truth_bias_x,truth_bias_y,truth_bias_z,qw,qx,qy,qz,truth_qw,truth_qx,truth_qy,truth_qz,prediction_error_rad,gravity_correction_rad,gyro_x,gyro_y,gyro_z,accel_x,accel_y,accel_z,nis,yaw_correction_rad,known_bias_gyro_error_rad,accel_truth_angle_rad\n");
     for(i=0;i<=5820;++i) {
         imu_sample_t raw,s; imu_vec3f_t euler,accel,rotation;
         imu_quatf_t dq={1,0,0,0}; imu_motion_quality_t quality;
@@ -121,11 +131,26 @@ bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
         if(out[0].fusion_mode==IMU_FUSION_GYRO_ONLY) quality.accel_weight=0;
         begin=clock();status[1]=imu_complementary_process(&cf,&c,&s,&quality,&out[1]);ticks[1]+=clock()-begin;
         if(i) (void)imu_esekf_predict(&predicted,&c,(imu_vec3f_t){raw.gyro_rad_s[0],raw.gyro_rad_s[1],raw.gyro_rad_s[2]},c.nominal_dt_s);
+        if(trace && i) (void)imu_quat_integrate(&diagnostic_gyro,
+            (imu_vec3f_t){raw.gyro_rad_s[0]-bias.x,raw.gyro_rad_s[1]-bias.y,raw.gyro_rad_s[2]-bias.z},c.nominal_dt_s);
         nis=gravity_nis(&predicted,&c,&s,raw.accel_sample_fresh?es.quality.accel_weight:0);
         (void)imu_quat_to_euler_ned(truth,&euler);
         for(k=0;k<2;++k) {
             double er=wrap(out[k].roll_rad-euler.x),ep=wrap(out[k].pitch_rad-euler.y);
             double ey=wrap(out[k].yaw_rad-euler.z),qe=angle(out[k].q_nb,truth);
+            if(trace && k==0) {
+                imu_vec3f_t predicted_angles,gravity;double gravity_dot;
+                (void)imu_quat_to_euler_ned(predicted.q_nb,&predicted_angles);
+                (void)imu_quat_rotate(imu_quat_conjugate(truth),(imu_vec3f_t){0,0,-1},&gravity);
+                gravity_dot=imu_vec3_dot(gravity,accel)/imu_vec3_norm(accel);
+                fprintf(trace,"%.12g,%.12g,%.12g,%.12g,%.12g,%.9g,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.12g,%.12g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.12g,%.12g,%.12g,%.12g\n",
+                t,qe,er,ep,ey,out[k].accel_weight,(unsigned)out[k].fusion_mode,
+                out[k].gyro_bias_rad_s.x,out[k].gyro_bias_rad_s.y,out[k].gyro_bias_rad_s.z,
+                bias.x,bias.y,bias.z,out[k].q_nb.w,out[k].q_nb.x,out[k].q_nb.y,out[k].q_nb.z,
+                truth.w,truth.x,truth.y,truth.z,angle(predicted.q_nb,truth),angle(predicted.q_nb,out[k].q_nb),
+                raw.gyro_rad_s[0],raw.gyro_rad_s[1],raw.gyro_rad_s[2],s.accel_m_s2[0],s.accel_m_s2[1],s.accel_m_s2[2],nis,
+                wrap(out[k].yaw_rad-predicted_angles.z),angle(diagnostic_gyro,truth),acos(fmax(-1,fmin(1,gravity_dot))));
+            }
             imu_quatf_t di=imu_quat_multiply(imu_quat_conjugate(previous[k]),out[k].q_nb);
             imu_quatf_t dt=imu_quat_multiply(imu_quat_conjugate(previous_truth),truth);
             if(!isfinite(qe) || !isfinite(er) || !isfinite(ep) || !isfinite(ey) ||
@@ -136,7 +161,7 @@ bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
                 if(!(out[k].health_flags&IMU_HEALTH_ACCEL_DEGRADED) || out[k].fusion_mode!=IMU_FUSION_GYRO_ONLY) ++m[k].unreported_degraded;
             m[k].roll_rms+=er*er;m[k].pitch_rms+=ep*ep;m[k].yaw_rms+=ey*ey;
             m[k].peak=fmax(m[k].peak,qe);
-            if(t>=8 && hypot(er,ep)>0.034907) last_bad[k]=t;
+            imu_recovery_observe(&recovery[k],t,hypot(er,ep));
             if(k==0 && raw.accel_sample_fresh && es.quality.accel_weight>=c.accel_weight_min) {
                 m[k].nis_mean+=nis;m[k].nis_max=fmax(m[k].nis_max,nis);++m[k].nis_samples;
             }
@@ -151,7 +176,7 @@ bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
     }
     for(k=0;k<2;++k) {
         m[k].roll_rms=sqrt(m[k].roll_rms/m[k].samples);m[k].pitch_rms=sqrt(m[k].pitch_rms/m[k].samples);
-        m[k].yaw_rms=sqrt(m[k].yaw_rms/m[k].samples);m[k].recovery=last_bad[k]>11.5?INFINITY:last_bad[k]-8;
+        m[k].yaw_rms=sqrt(m[k].yaw_rms/m[k].samples);m[k].recovery=imu_recovery_result(&recovery[k],12);
         m[k].bias_error=sqrt(pow(out[k].gyro_bias_rad_s.x-bias.x,2)+pow(out[k].gyro_bias_rad_s.y-bias.y,2)+pow(out[k].gyro_bias_rad_s.z-bias.z,2));
         if(m[k].nis_samples)m[k].nis_mean/=m[k].nis_samples;
         m[k].cpu_s=(double)ticks[k]/CLOCKS_PER_SEC;
@@ -159,6 +184,8 @@ bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
     m[0].memory_bytes=sizeof es; m[1].memory_bytes=sizeof cf+sizeof(imu_motion_quality_t);
     return true;
 }
+bool imu_run_scenario(unsigned scenario,uint32_t seed,imu_metrics_t m[2])
+{ return imu_run_scenario_trace(scenario,seed,m,NULL); }
 bool imu_compare_accept(const imu_metrics_t *e,const imu_metrics_t *c)
 {
     return hypot(e->roll_rms,e->pitch_rms)<hypot(c->roll_rms,c->pitch_rms) &&

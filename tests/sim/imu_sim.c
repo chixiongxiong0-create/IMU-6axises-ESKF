@@ -50,7 +50,10 @@ bool imu_sim_init(imu_sim_t *s,const imu_sim_config_t *c)
     if(!s || !c || !isfinite(c->substep_s) || c->substep_s<=0 ||
        !isfinite(c->gyro_delay_s) || !isfinite(c->accel_delay_s) ||
        c->gyro_delay_s<0 || c->accel_delay_s<0 ||
-       fmax(c->gyro_delay_s,c->accel_delay_s)/c->substep_s>IMU_SIM_QUEUE-4 ||
+       /* Every frame boundary may add a shortened integration step. Count
+        * those points as well as full substeps, plus bracketing endpoints. */
+       ceil(fmax(c->gyro_delay_s,c->accel_delay_s)/c->substep_s)+
+       ceil(fmax(c->gyro_delay_s,c->accel_delay_s)*485)+3>IMU_SIM_QUEUE ||
        !isfinite(c->gyro_sigma) || !isfinite(c->accel_sigma) || !isfinite(c->bias_rw) ||
        c->gyro_sigma<0 || c->accel_sigma<0 || c->bias_rw<0) return false;
     memset(s,0,sizeof *s); s->config=*c; s->rng=c->seed?c->seed:1;
@@ -64,7 +67,7 @@ bool imu_sim_init(imu_sim_t *s,const imu_sim_config_t *c)
     while(s->t<0) { push(s); s->t=fmin(0,s->t+c->substep_s); }
     push(s); return true;
 }
-static imu_sim_point_t delayed(const imu_sim_t *s,double t)
+static bool delayed(const imu_sim_t *s,double t,imu_sim_point_t *result)
 {
     unsigned j; imu_sim_point_t hi=s->queue[s->head],lo=hi,r=hi;
     for(j=1;j<s->count;++j) {
@@ -79,21 +82,42 @@ static imu_sim_point_t delayed(const imu_sim_t *s,double t)
                 r.input.bias[k]=lo.input.bias[k]+f*(hi.input.bias[k]-lo.input.bias[k]);
             }
             r.input.temperature=lo.input.temperature+f*(hi.input.temperature-lo.input.temperature);
-            return r;
+            /* Interpolation uses both measurements: keep any fault and require
+             * both contributors valid/fresh. At an endpoint use only that
+             * endpoint's diagnostics. Never label delayed data with now. */
+            if(f>=1) {
+                for(k=0;k<3;++k) {
+                    r.input.gyro_status[k]=hi.input.gyro_status[k];
+                    r.input.gyro_fresh[k]=hi.input.gyro_fresh[k];
+                }
+                r.input.accel_status=hi.input.accel_status;r.input.accel_fresh=hi.input.accel_fresh;
+            } else if(f>0) {
+                for(k=0;k<3;++k) {
+                    uint32_t a=lo.input.gyro_status[k],b=hi.input.gyro_status[k];
+                    r.input.gyro_status[k]=((a|b)&~IMU_SENSOR_DATA_VALID)|(a&b&IMU_SENSOR_DATA_VALID);
+                    r.input.gyro_fresh[k]=lo.input.gyro_fresh[k] && hi.input.gyro_fresh[k];
+                }
+                r.input.accel_status=((lo.input.accel_status|hi.input.accel_status)&~IMU_SENSOR_DATA_VALID)|
+                    (lo.input.accel_status&hi.input.accel_status&IMU_SENSOR_DATA_VALID);
+                r.input.accel_fresh=lo.input.accel_fresh && hi.input.accel_fresh;
+            }
+            *result=r;return true;
         }
         hi=lo;
     }
-    return lo;
+    /* A caller-mutated configuration must never silently substitute the
+     * oldest available point for the requested physical measurement time. */
+    return false;
 }
 bool imu_sim_next(imu_sim_t *s,imu_sample_t *x,imu_quatf_t *q,imu_vec3f_t *b)
 {
     double target,force[3],bias[3]; unsigned i,j;
-    imu_sim_point_t g,a; imu_sim_input_t current;
+    imu_sim_point_t g,a;
     if(!s || !x || !q || !b) return false;
     target=(double)s->frame/485;
     while(s->t+1e-12<target) advance(s,fmin(s->config.substep_s,target-s->t));
-    g=delayed(s,target-s->config.gyro_delay_s); a=delayed(s,target-s->config.accel_delay_s);
-    current=input(s,target);
+    if(!delayed(s,target-s->config.gyro_delay_s,&g) ||
+       !delayed(s,target-s->config.accel_delay_s,&a))return false;
     force[0]=-9.80665*2*(a.q[1]*a.q[3]-a.q[0]*a.q[2])+a.input.acceleration[0];
     force[1]=-9.80665*2*(a.q[2]*a.q[3]+a.q[0]*a.q[1])+a.input.acceleration[1];
     force[2]=-9.80665*(1-2*(a.q[1]*a.q[1]+a.q[2]*a.q[2]))+a.input.acceleration[2];
@@ -108,10 +132,10 @@ bool imu_sim_next(imu_sim_t *s,imu_sample_t *x,imu_quatf_t *q,imu_vec3f_t *b)
         x->gyro_rad_s[i]=(float)(gv+bias[i]+s->config.gyro_sigma*normal(s));
         x->accel_m_s2[i]=(float)(av+s->config.accel_bias_poly[i][0]+ta*(s->config.accel_bias_poly[i][1]+ta*s->config.accel_bias_poly[i][2])+s->config.accel_sigma*normal(s));
         x->gyro_temperature_c[i]=(float)g.input.temperature;
-        x->gyro_status[i]=current.gyro_status[i]; x->gyro_sample_fresh[i]=current.gyro_fresh[i];
+        x->gyro_status[i]=g.input.gyro_status[i]; x->gyro_sample_fresh[i]=g.input.gyro_fresh[i];
     }
     x->accel_temperature_c=(float)a.input.temperature;
-    x->accel_status=current.accel_status; x->accel_sample_fresh=current.accel_fresh;
+    x->accel_status=a.input.accel_status; x->accel_sample_fresh=a.input.accel_fresh;
     *q=(imu_quatf_t){(float)s->q[0],(float)s->q[1],(float)s->q[2],(float)s->q[3]};
     *b=(imu_vec3f_t){(float)bias[0],(float)bias[1],(float)bias[2]};
     ++s->frame; return true;

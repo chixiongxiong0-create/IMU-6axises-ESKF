@@ -5,6 +5,31 @@ static void rate(double t,imu_sim_input_t *u,void *ctx)
 { (void)ctx; u->omega[0]=1; u->temperature=30; u->acceleration[0]=t; }
 static void ramp(double t,imu_sim_input_t *u,void *ctx)
 { (void)ctx;u->omega[2]=t;u->accel_fresh=false;u->gyro_status[1]|=IMU_SENSOR_PARITY_ERROR; }
+static void sensor_shock(double t,imu_sim_input_t *u,void *ctx)
+{
+    (void)ctx;
+    if(t>=0.03 && t<0.05) {
+        u->acceleration[2]=60;u->accel_status|=IMU_SENSOR_OVERRANGE;
+        u->omega[0]=2;u->gyro_status[0]|=IMU_SENSOR_PARITY_ERROR;
+    }
+}
+static void delayed_status_test(void)
+{
+    imu_sim_config_t c;imu_sim_t sim;imu_sample_t x;imu_quatf_t q;
+    imu_vec3f_t bias;unsigned i,accel_faults=0,gyro_faults=0;
+    imu_sim_defaults(&c);c.motion=sensor_shock;
+    TEST_ASSERT(imu_sim_init(&sim,&c));
+    for(i=0;i<40;++i) {
+        TEST_ASSERT(imu_sim_next(&sim,&x,&q,&bias));
+        if(x.accel_m_s2[2]>-9) {
+            ++accel_faults;TEST_ASSERT(x.accel_status&IMU_SENSOR_OVERRANGE);
+        }
+        if(x.gyro_rad_s[0]>0.01f) {
+            ++gyro_faults;TEST_ASSERT(x.gyro_status[0]&IMU_SENSOR_PARITY_ERROR);
+        }
+    }
+    TEST_ASSERT(accel_faults>0 && gyro_faults>0);
+}
 static void simulator_tests(void)
 {
     imu_sim_config_t c; imu_sim_t a,b; imu_sample_t x={0},y={0};
@@ -45,6 +70,18 @@ static void simulator_tests(void)
     TEST_ASSERT(!x.accel_sample_fresh && (x.gyro_status[1]&IMU_SENSOR_PARITY_ERROR));
     imu_sim_defaults(&c);c.gyro_sigma=NAN;
     TEST_ASSERT(!imu_sim_init(&a,&c));
+    /* Frame boundaries split a nominal 10 ms substep into 485 history points
+     * per second: a 256-entry queue cannot retain a one-second delay. */
+    imu_sim_defaults(&c);c.substep_s=0.01;c.gyro_delay_s=c.accel_delay_s=1;
+    TEST_ASSERT(!imu_sim_init(&a,&c));
+    c.gyro_delay_s=c.accel_delay_s=0.4;c.motion=ramp;
+    TEST_ASSERT(imu_sim_init(&a,&c));
+    for(i=0;i<=970;++i)TEST_ASSERT(imu_sim_next(&a,&x,&q,&bias));
+    TEST_ASSERT_NEAR(x.gyro_rad_s[2],1.6,2e-6);
+    TEST_ASSERT_NEAR(q.z,0.841470985,2e-6);
+    a.config.gyro_delay_s=1;
+    TEST_ASSERT(!imu_sim_next(&a,&x,&q,&bias));
+    delayed_status_test();
 }
 static void scenario_tests(void)
 {
@@ -60,6 +97,24 @@ static void scenario_tests(void)
         TEST_ASSERT(m[0].recovery<=f->recovery_limit);
         TEST_ASSERT(m[0].failures==0 && m[0].discontinuities==0 && m[0].unreported_degraded==0);
         TEST_ASSERT(m[0].bias_error<f->bias_limit && m[0].consistency_max<f->consistency_limit);
+    }
+}
+static void recovery_tests(void)
+{
+    const unsigned scenarios[3]={3,6,7};
+    const double unsettled[3]={4.5,3.2,4.75},expected[3]={0.5,0.18,0.75};
+    unsigned i;imu_recovery_t r;
+    /* Pulse ends at 4 s, shock at 3.02 s, bias settles to its new value at
+     * the 4 s step. Excursions before each endpoint do not count. */
+    for(i=0;i<3;++i) {
+        imu_recovery_init(&r,imu_scenarios[scenarios[i]].disturbance_end_s);
+        imu_recovery_observe(&r,1,0.2);
+        TEST_ASSERT_NEAR(imu_recovery_result(&r,12),0,1e-12);
+        imu_recovery_observe(&r,unsettled[i],0.04);
+        imu_recovery_observe(&r,unsettled[i]+0.1,0.01);
+        TEST_ASSERT_NEAR(imu_recovery_result(&r,12),expected[i],1e-12);
+        imu_recovery_observe(&r,11.75,0.04);
+        TEST_ASSERT(isinf(imu_recovery_result(&r,12)));
     }
 }
 static void comparison_test(void)
@@ -86,8 +141,14 @@ static void comparison_test(void)
 }
 int main(int argc,char **argv)
 {
-    if(argc==2 && strcmp(argv[1],"--simulator")==0) simulator_tests();
+    if(argc==3 && strcmp(argv[1],"--diagnose")==0) {
+        imu_metrics_t m[2];FILE *trace=fopen(argv[2],"w");
+        TEST_ASSERT(trace!=NULL);
+        if(trace) {TEST_ASSERT(imu_run_scenario_trace(10,42,m,trace));TEST_ASSERT(fclose(trace)==0);}
+    }
+    else if(argc==2 && strcmp(argv[1],"--simulator")==0) simulator_tests();
     else if(argc==2 && strcmp(argv[1],"--comparison")==0) comparison_test();
+    else if(argc==2 && strcmp(argv[1],"--recovery")==0) recovery_tests();
     else scenario_tests();
     return test_summary();
 }

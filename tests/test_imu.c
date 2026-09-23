@@ -276,6 +276,33 @@ static void delay_compensation(void)
     TEST_ASSERT(memcmp(&out,&same,sizeof out)==0);
 }
 
+/* Catches exit hysteresis admitting a currently nonstatic sample, and retaining
+ * old alignment samples after that failure instead of requiring a new run. */
+static void alignment_requires_current_static_qualification(void)
+{
+    imu_t imu={0}; imu_config_t c; imu_calibration_t cal=calibration();
+    imu_output_t out={0}; imu_sample_t s;
+    imu_config_defaults(&c);
+    c.quality_window_samples=1; c.static_enter_samples=1;
+    c.static_exit_samples=3; c.alignment_samples=2;
+    c.static_jerk_max_m_s3=0;
+    TEST_ASSERT(imu_init(&imu,&c,&cal));
+    s=sample_at(0);
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_NOT_INITIALIZED);
+    TEST_ASSERT(!out.initialized);
+    s=sample_at(1); s.accel_m_s2[0]=0.001f;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_NOT_INITIALIZED);
+    TEST_ASSERT(!out.initialized);
+    /* Hold the new force constant: the failed sample must have reset the run,
+     * so one new qualifying sample is still insufficient. */
+    s.timestamp_ns=sample_at(2).timestamp_ns;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_NOT_INITIALIZED);
+    TEST_ASSERT(!out.initialized);
+    s.timestamp_ns=sample_at(3).timestamp_ns;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+    TEST_ASSERT(out.initialized);
+}
+
 int main(void)
 {
     initialization();
@@ -285,5 +312,6 @@ int main(void)
     magnetometer_noop();
     validation_edges();
     delay_compensation();
+    alignment_requires_current_static_qualification();
     return test_summary();
 }

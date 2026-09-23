@@ -151,7 +151,8 @@ static float seconds(uint64_t ns)
 static bool align(imu_t *n, const imu_calibrated_sample_t *v)
 {
     if(n->config.init_mode==IMU_INIT_QUATERNION) n->state=IMU_STATE_RUNNING;
-    else if(n->quality.static_detected && n->quality.mode_reasons==0) {
+    else if(n->quality.static_detected && n->quality.static_enter_count>0 &&
+            n->quality.mode_reasons==0) {
         const float count=(float)++n->alignment_count;
 #define AVERAGE(field, value) n->field.x+=(value.x-n->field.x)/count; \
     n->field.y+=(value.y-n->field.y)/count; n->field.z+=(value.z-n->field.z)/count

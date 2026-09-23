@@ -1,6 +1,7 @@
 #include "imu/imu_esekf.h"
 #include "imu/imu_math.h"
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
@@ -9,22 +10,74 @@ static bool finite_vec(imu_vec3f_t v)
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
 
-/* Finite positive diagonals and symmetry. This is
- * not a full PSD proof: long unaided single-precision propagation can become
- * ill-conditioned. Innovation inversion separately checks positive pivots. */
-bool imu_esekf_covariance_valid(const imu_esekf_t *f)
+/* Test a dimensionless correlation matrix with bounded diagonal loading.
+ * Six-term dot products and normalization round in float. An 8-epsilon pivot
+ * margin detects loss of definiteness early; 32 epsilon is the entire repair
+ * budget, not an escalating retry capable of hiding a substantial negative
+ * mode. Diagonal scaling keeps small bias variances visible beside angles. */
+#define COVARIANCE_PIVOT_MARGIN (8.0f*FLT_EPSILON)
+#define COVARIANCE_REPAIR (32.0f*FLT_EPSILON)
+
+static bool covariance_cholesky(float a[6][6], float loading, float margin)
 {
-    unsigned i, j;
-    if (f == NULL) return false;
-    for (i = 0; i < 6; ++i)
-        if (!isfinite(f->P[i][i]) || f->P[i][i] <= 0) return false;
+    float l[6][6] = {{0}};
+    unsigned i, j, k;
     for (i = 0; i < 6; ++i) {
-        for (j = 0; j < 6; ++j) {
-            const float a = f->P[i][j], b = f->P[j][i];
-            if (!isfinite(a) || !isfinite(b) ||
-                fabsf(a-b) > 1e-5f*fmaxf(fabsf(a), fabsf(b))) return false;
+        for (j = 0; j <= i; ++j) {
+            float value = a[i][j];
+            if (i == j) value += loading;
+            for (k = 0; k < j; ++k) value -= l[i][k]*l[j][k];
+            if (!isfinite(value)) return false;
+            if (i == j) {
+                if (value <= margin) return false;
+                l[i][j] = sqrtf(value);
+            } else {
+                l[i][j] = value/l[j][j];
+                if (!isfinite(l[i][j])) return false;
+            }
         }
     }
+    return true;
+}
+
+/* -1: invalid; 0: positive pivots with margin; 1: roundoff-scale repair needed.
+ * The validator is read-only. Committing operations repair their local copy. */
+static int covariance_status(const imu_esekf_t *f)
+{
+    float a[6][6], scale[6];
+    unsigned i, j;
+    if (f == NULL) return -1;
+    for (i = 0; i < 6; ++i) {
+        if (!isfinite(f->P[i][i]) || f->P[i][i] <= 0) return -1;
+        scale[i] = sqrtf(f->P[i][i]);
+    }
+    for (i = 0; i < 6; ++i) {
+        for (j = 0; j < 6; ++j) {
+            const float p = f->P[i][j], q = f->P[j][i];
+            if (!isfinite(p) || !isfinite(q) ||
+                fabsf(p-q) > 1e-5f*fmaxf(fabsf(p), fabsf(q))) return -1;
+            a[i][j] = i == j ? 1.0f : (0.5f*p+0.5f*q)/scale[i]/scale[j];
+        }
+    }
+    if (covariance_cholesky(a, 0, COVARIANCE_PIVOT_MARGIN)) return 0;
+    return covariance_cholesky(a, COVARIANCE_REPAIR, 0) ? 1 : -1;
+}
+
+bool imu_esekf_covariance_valid(const imu_esekf_t *f)
+{
+    return covariance_status(f) >= 0;
+}
+
+static bool condition_covariance(imu_esekf_t *f)
+{
+    const int status = covariance_status(f);
+    unsigned i;
+    if (status < 0) return false;
+    if (status == 0) return true;
+    /* Congruence maps correlation loading back to P + eps*diag(P).
+     * Off-diagonal correlations and Joseph/reset terms are left intact. */
+    for (i = 0; i < 6; ++i) f->P[i][i] += COVARIANCE_REPAIR*f->P[i][i];
+    if (covariance_status(f) != 0) return false;
     return true;
 }
 
@@ -110,7 +163,7 @@ imu_status_t imu_esekf_predict(imu_esekf_t *f, const imu_config_t *c,
         next.P[i][i] += qtheta;
         next.P[i+3][i+3] += qbias;
     }
-    if (!imu_mat6_symmetrize(next.P) || !imu_esekf_covariance_valid(&next))
+    if (!imu_mat6_symmetrize(next.P) || !condition_covariance(&next))
         return IMU_STATUS_NUMERICAL_FAULT;
     *f = next;
     return IMU_STATUS_OK;
@@ -224,6 +277,7 @@ static imu_status_t measurement_update(imu_esekf_t *f, float h[3][6],
     for (i = 0; i < 3; ++i)
         for (j = 0; j < 3; ++j) transform[i][j] -= 0.5f*skew_delta[i][j];
     if (!transform_covariance(next.P, transform) || !imu_mat6_symmetrize(next.P) ||
+        !condition_covariance(&next) ||
         state_valid(&next) != IMU_STATUS_OK) return IMU_STATUS_NUMERICAL_FAULT;
     *f = next;
     return IMU_STATUS_OK;

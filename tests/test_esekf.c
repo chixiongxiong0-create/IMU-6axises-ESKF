@@ -28,6 +28,115 @@ static imu_esekf_t identity_filter(const imu_config_t *c)
     return f;
 }
 
+/* Independent double Jacobi eigenvalues of the correlation matrix. This is
+ * deliberately not the production factorization or its validity predicate. */
+static double minimum_correlation_eigenvalue(const imu_esekf_t *f)
+{
+    double a[6][6], smallest;
+    unsigned i, j, iteration;
+    for (i = 0; i < 6; ++i)
+        for (j = 0; j < 6; ++j)
+            a[i][j] = (double)f->P[i][j]/sqrt((double)f->P[i][i]*f->P[j][j]);
+    for (iteration = 0; iteration < 200; ++iteration) {
+        unsigned p = 0, q = 1;
+        double largest = 0, angle, c, s, app, aqq, apq;
+        for (i = 0; i < 6; ++i)
+            for (j = i+1; j < 6; ++j)
+                if (fabs(a[i][j]) > largest) {
+                    largest = fabs(a[i][j]); p = i; q = j;
+                }
+        if (largest < 1e-14) break;
+        angle = 0.5*atan2(2*a[p][q], a[q][q]-a[p][p]);
+        c = cos(angle); s = sin(angle);
+        app = a[p][p]; aqq = a[q][q]; apq = a[p][q];
+        for (i = 0; i < 6; ++i) {
+            if (i == p || i == q) continue;
+            const double aip = a[i][p], aiq = a[i][q];
+            a[i][p] = a[p][i] = c*aip-s*aiq;
+            a[i][q] = a[q][i] = s*aip+c*aiq;
+        }
+        a[p][p] = c*c*app-2*c*s*apq+s*s*aqq;
+        a[q][q] = s*s*app+2*c*s*apq+c*c*aqq;
+        a[p][q] = a[q][p] = 0;
+    }
+    TEST_ASSERT(iteration < 200);
+    smallest = a[0][0];
+    for (i = 1; i < 6; ++i) smallest = fmin(smallest, a[i][i]);
+    return smallest;
+}
+
+/* The [1,2;2,1] block has eigenvalues 3 and -1 despite positive diagonals.
+ * Removing PSD rejection must fail validation and every transactional API. */
+static void test_indefinite_covariance(void)
+{
+    imu_config_t c = config();
+    const float scales[] = {1e-12f, 1.0f, 1e12f};
+    const uint32_t flags[3] = {1, 1, 1};
+    unsigned i, trial;
+    for (trial = 0; trial < 3; ++trial) {
+        imu_esekf_t f = identity_filter(&c), before;
+        imu_output_t out, saved;
+        for (i = 0; i < 6; ++i) f.P[i][i] = scales[trial];
+        f.P[0][1] = f.P[1][0] = 2*scales[trial];
+        before = f;
+        TEST_ASSERT_NEAR(minimum_correlation_eigenvalue(&f), -1, 1e-12);
+        TEST_ASSERT(!imu_esekf_covariance_valid(&f));
+        TEST_ASSERT(imu_esekf_predict(&f, &c, (imu_vec3f_t){0, 0, 0}, 0.01f)
+                    == IMU_STATUS_NUMERICAL_FAULT);
+        TEST_ASSERT(memcmp(&f, &before, sizeof(f)) == 0);
+        f = before;
+        TEST_ASSERT(imu_esekf_update_gravity(&f, &c, (imu_vec3f_t){0, 0, -9.8f}, 1)
+                    == IMU_STATUS_NUMERICAL_FAULT);
+        TEST_ASSERT(memcmp(&f, &before, sizeof(f)) == 0);
+        f = before;
+        TEST_ASSERT(imu_esekf_update_zero_rate(&f, &c, (imu_vec3f_t){0, 0, 0}, flags)
+                    == IMU_STATUS_NUMERICAL_FAULT);
+        TEST_ASSERT(memcmp(&f, &before, sizeof(f)) == 0);
+        f = before;
+        memset(&out, 0x5a, sizeof(out)); saved = out;
+        TEST_ASSERT(imu_esekf_get_output(&f, &out) == IMU_STATUS_NUMERICAL_FAULT);
+        TEST_ASSERT(memcmp(&out, &saved, sizeof(out)) == 0);
+    }
+}
+
+/* A two-ulp negative mode is rounding scale, not a corrupt prior. Each
+ * committing API must regularize it; a no-op/validator must not mutate it. */
+static void test_roundoff_covariance(void)
+{
+    imu_config_t c = config();
+    const float scales[] = {1e-12f, 1.0f, 1e12f};
+    const uint32_t flags[3] = {1, 1, 1};
+    unsigned trial, operation, i;
+    c.gyro_noise_density = c.gyro_bias_rw = 0;
+    for (trial = 0; trial < 3; ++trial) {
+        c.accel_direction_noise_variance = 0.0025f*scales[trial];
+        c.zero_rate_noise_variance = 0.0001f*scales[trial];
+        for (operation = 0; operation < 3; ++operation) {
+            imu_esekf_t f = identity_filter(&c), before;
+            imu_status_t status;
+            for (i = 0; i < 6; ++i) f.P[i][i] = scales[trial];
+            /* An unobserved attitude block for zero-rate and yaw/bias block
+             * for gravity; the negative mode survives a zero residual. */
+            i = operation == 1 ? 5 : 0;
+            f.P[2][i] = f.P[i][2] = scales[trial]*(1+2*FLT_EPSILON);
+            before = f;
+            TEST_ASSERT(minimum_correlation_eigenvalue(&f) < -FLT_EPSILON);
+            TEST_ASSERT(imu_esekf_covariance_valid(&f));
+            TEST_ASSERT(memcmp(&f, &before, sizeof(f)) == 0);
+            if (operation == 0)
+                status = imu_esekf_predict(&f, &c, (imu_vec3f_t){0, 0, 0}, 1e-8f);
+            else if (operation == 1)
+                status = imu_esekf_update_gravity(&f, &c, (imu_vec3f_t){0, 0, -9.8f}, 1);
+            else
+                status = imu_esekf_update_zero_rate(&f, &c, (imu_vec3f_t){0, 0, 0}, flags);
+            TEST_ASSERT(status == IMU_STATUS_OK);
+            TEST_ASSERT(minimum_correlation_eigenvalue(&f) >= -1e-12);
+            for (i = 0; i < 6; ++i)
+                TEST_ASSERT(f.P[i][i] <= before.P[i][i]*(1+64*FLT_EPSILON));
+        }
+    }
+}
+
 /* Independent double RK4 quaternion ODE truth; catches the multiplication side,
  * axes, sign, dt, and bias-subtraction bugs without using production helpers. */
 static void derivative(const double q[4], const double w[3], double d[4])
@@ -106,6 +215,15 @@ static void test_ten_minutes(void)
             return;
         }
         TEST_ASSERT_NEAR(imu_quat_norm(f.q_nb), 1, 2e-5f);
+        if (i % 1000 == 0 || i == 485U*600U-1) {
+            const double eigenvalue = minimum_correlation_eigenvalue(&f);
+            TEST_ASSERT(eigenvalue >= -8*FLT_EPSILON);
+            if (eigenvalue < -8*FLT_EPSILON) {
+                fprintf(stderr, "non-PSD covariance at step %u: normalized eigenvalue %.9g\n",
+                        i, eigenvalue);
+                return;
+            }
+        }
     }
     TEST_ASSERT(imu_esekf_covariance_valid(&f));
     TEST_ASSERT(f.P[2][2] > c.initial_covariance_diag[2]);
@@ -398,6 +516,10 @@ static void test_gravity_bias_limit(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 1 || strcmp(argv[1], "psd") == 0) {
+        test_indefinite_covariance();
+        test_roundoff_covariance();
+    }
     if (argc == 1 || strcmp(argv[1], "propagation") == 0) {
         test_propagation();
         test_prediction_guards();

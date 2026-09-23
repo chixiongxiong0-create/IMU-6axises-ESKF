@@ -42,8 +42,11 @@ imu_status_t imu_esekf_update_zero_rate(imu_esekf_t *filter,
                                       const imu_config_t *config,
                                       imu_vec3f_t gyro_calibrated_rad_s,
                                       const uint32_t gyro_status[3]);
-/* Checks finite entries, symmetry, and strictly positive diagonals. Does not
- * certify full positive definiteness of an ill-conditioned float covariance. */
+/* Read-only finite/symmetry/positive-diagonal and scale-aware PSD check.
+ * Tolerates only float roundoff: at most 32*FLT_EPSILON diagonal loading in
+ * correlation coordinates. Predictions and measurement updates regularize
+ * near-zero pivots within that budget before committing; material negative
+ * modes return NUMERICAL_FAULT transactionally. */
 bool imu_esekf_covariance_valid(const imu_esekf_t *filter);
 /* Populates attitude, bias, last corrected rate and Euler-angle uncertainty.
  * Returns NUMERICAL_FAULT at the Euler pitch singularity (|cos(pitch)|<1e-5).

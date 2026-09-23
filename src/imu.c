@@ -1,5 +1,6 @@
 #include "imu/imu.h"
 #include "imu/imu_math.h"
+#include "imu_timing.h"
 #include <math.h>
 #include <string.h>
 
@@ -34,6 +35,8 @@ void imu_config_defaults(imu_config_t *c)
 static bool config_valid(const imu_config_t *c)
 {
     unsigned i;
+    uint64_t delay_ns;
+    if(!imu_common_gyro_delay_ns(c,&delay_ns)) return false;
 #define NONNEG(field) if (!isfinite(c->field) || c->field<0) return false
     NONNEG(min_dt_s); NONNEG(max_dt_s); NONNEG(max_delay_compensation_s);
     NONNEG(gyro_noise_density); NONNEG(gyro_bias_rw);
@@ -179,8 +182,10 @@ imu_status_t imu_process(imu_t *imu, const imu_sample_t *s, imu_output_t *out)
     imu_fusion_mode_t mode=IMU_FUSION_GYRO_ONLY;
     float dt=0; unsigned i; uint32_t flags=IMU_HEALTH_HEADING_UNOBSERVABLE;
     imu_status_t status=IMU_STATUS_OK;
+    uint64_t delay_ns;
     if(!imu || !s || !out) return IMU_STATUS_BAD_ARGUMENT;
     if(!imu->configured) return IMU_STATUS_NOT_INITIALIZED;
+    if(!imu_common_gyro_delay_ns(&imu->config,&delay_ns)) return IMU_STATUS_BAD_ARGUMENT;
     if(!sample_finite(s)) return IMU_STATUS_NONFINITE;
     if(imu->state==IMU_STATE_FAULT) { *out=imu->output; return IMU_STATUS_NUMERICAL_FAULT; }
     if(imu->has_timestamp) {
@@ -212,8 +217,8 @@ imu_status_t imu_process(imu_t *imu, const imu_sample_t *s, imu_output_t *out)
         else if(!imu_biquad_process(&n.accel_notches[i],v.accel_m_s2,&v.accel_m_s2)) accel_good=false;
     }
     if(gyro_good && accel_good && !gap) {
-        /* Constant-rate bounded delay approximation. For unequal gyro ages,
-         * each component contributes its own relative rotation-vector age.
+        /* Constant-rate bounded delay approximation at the common gyro age.
+         * Unequal sensor ages are rejected before calibration mixes axes.
          * q_new=q_old*dq => fixed-vector body coordinates advance by conj(dq).
          * Equal signal-chain delays are an exact bypass. */
         imu_vec3f_t rotation={
@@ -303,6 +308,7 @@ imu_status_t imu_process(imu_t *imu, const imu_sample_t *s, imu_output_t *out)
     if(gap) status=IMU_STATUS_TIME_GAP;
     if(n.state==IMU_STATE_RUNNING || n.state==IMU_STATE_DEGRADED) {
         if(imu_esekf_get_output(&n.esekf,&n.output)!=IMU_STATUS_OK) return fault(imu,out);
+        flags|=n.output.health_flags;
         n.state=status==IMU_STATUS_OK?IMU_STATE_RUNNING:IMU_STATE_DEGRADED;
         n.output.initialized=true;
         n.output.fusion_mode=mode;
@@ -314,7 +320,9 @@ imu_status_t imu_process(imu_t *imu, const imu_sample_t *s, imu_output_t *out)
     n.output.accel_weight=n.quality.accel_weight;
     n.output.calibration_valid=n.calibration_valid;
     n.output.timestamp_ns=s->timestamp_ns;
-    *imu=n; *out=n.output; return status;
+    imu_output_epoch(&n.output,delay_ns);
+    if(n.state==IMU_STATE_RUNNING && n.output.status!=IMU_STATUS_OK) n.state=IMU_STATE_DEGRADED;
+    *imu=n; *out=n.output; return out->status;
 }
 
 bool imu_reset(imu_t *imu)

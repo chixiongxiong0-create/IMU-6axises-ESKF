@@ -29,9 +29,10 @@ typedef struct {
 
 /* Conservative starting values, SI units, 485 Hz; tune against hardware logs.
  * Notches and signal delays default to zero/bypass. Set measured delays from
- * the acquisition chain; each |accel_delay - gyro_delay[i]| must be bounded by
+ * the acquisition chain; all gyro delays must be exactly equal and
+ * |accel_delay - gyro_delay[0]| must be bounded by
  * max_delay_compensation_s. Compensation is a constant-rate approximation,
- * component-wise for independently delayed gyro axes, not clock synchronization. */
+ * using a common gyro epoch, not clock synchronization. */
 void imu_config_defaults(imu_config_t *config);
 /* Transactional validation. NULL calibration is allowed only in explicit
  * diagnostic allow_uncalibrated mode. Even known-q initialization waits for a
@@ -48,6 +49,12 @@ bool imu_init(imu_t *imu, const imu_config_t *config,
  * motion with a reused reading. Stale acceleration never updates quality or
  * gravity. Observation rejection preserves successful propagation. A hard
  * numerical fault latches invalid output until reset/reinitialization.
+ * timestamp_ns remains the input host latch/publication reference;
+ * attitude_epoch_ns subtracts the common gyro delay. No prediction to the
+ * host epoch is performed. If this subtraction would underflow, epoch is 0,
+ * TIMING_DEGRADED is set, timing_status is BAD_ARGUMENT (TIME_GAP takes
+ * precedence), and an otherwise OK frame returns SENSOR_DEGRADED. A known
+ * initial quaternion must describe the first frame's physical gyro epoch.
  * Valid calls write output, including NOT_INITIALIZED during alignment.
  * Buffers must not overlap the imu object. No dynamic allocation is used. */
 imu_status_t imu_process(imu_t *imu, const imu_sample_t *sample,

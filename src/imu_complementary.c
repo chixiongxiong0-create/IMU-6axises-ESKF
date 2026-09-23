@@ -1,6 +1,7 @@
 #include "imu/imu_complementary.h"
 
 #include "imu/imu_math.h"
+#include "imu_timing.h"
 
 #include <float.h>
 #include <math.h>
@@ -20,7 +21,9 @@ static bool finite_quat(imu_quatf_t q)
 
 static bool config_valid(const imu_config_t *c)
 {
-    return c != NULL && isfinite(c->min_dt_s) && c->min_dt_s > 0.0f &&
+    uint64_t delay_ns;
+    return c != NULL && imu_common_gyro_delay_ns(c,&delay_ns) &&
+           isfinite(c->min_dt_s) && c->min_dt_s > 0.0f &&
            isfinite(c->max_dt_s) && c->max_dt_s >= c->min_dt_s &&
            isfinite(c->complementary_kp) && c->complementary_kp >= 0.0f &&
            isfinite(c->complementary_ki) && c->complementary_ki >= 0.0f &&
@@ -55,12 +58,13 @@ static float elapsed_seconds(uint64_t elapsed_ns)
 }
 
 static imu_status_t fill_output(const imu_complementary_t *f,
-                                const imu_sample_t *s, float shared_weight,
+                                const imu_config_t *c, const imu_sample_t *s, float shared_weight,
                                 bool corrected,
                                 imu_status_t status, bool gyro_good,
                                 bool accel_good, imu_output_t *out)
 {
     imu_vec3f_t euler;
+    uint64_t delay_ns;
     unsigned i;
     if (!imu_quat_to_euler_ned(f->q_nb, &euler))
         return IMU_STATUS_NUMERICAL_FAULT;
@@ -73,7 +77,8 @@ static imu_status_t fill_output(const imu_complementary_t *f,
     out->angular_rate_rad_s = f->angular_rate_rad_s;
     out->gyro_bias_rad_s = f->gyro_bias_rad_s;
     /* Benchmark has no covariance: flag distinguishes sentinel from sigma. */
-    out->attitude_std_rad = (imu_vec3f_t){FLT_MAX, FLT_MAX, FLT_MAX};
+    out->attitude_std_rad = (imu_vec3f_t){IMU_UNCERTAINTY_UNAVAILABLE_RAD,
+        IMU_UNCERTAINTY_UNAVAILABLE_RAD, IMU_UNCERTAINTY_UNAVAILABLE_RAD};
     out->accel_weight = accel_good ? shared_weight : 0.0f;
     out->fusion_mode = corrected &&
                        status == IMU_STATUS_OK ? IMU_FUSION_GRAVITY :
@@ -92,6 +97,8 @@ static imu_status_t fill_output(const imu_complementary_t *f,
     for (i = 0U; i < IMU_AXIS_COUNT; ++i)
         out->gyro_status[i] = s->gyro_status[i];
     out->accel_status = s->accel_status;
+    if(!imu_common_gyro_delay_ns(c,&delay_ns)) return IMU_STATUS_BAD_ARGUMENT;
+    imu_output_epoch(out,delay_ns);
     return IMU_STATUS_OK;
 }
 
@@ -225,11 +232,11 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
     } else {
         next.angular_rate_rad_s = (imu_vec3f_t){0,0,0};
     }
-    if (fill_output(&next, s, quality->accel_weight, weight > 0.0f,
+    if (fill_output(&next, c, s, quality->accel_weight, weight > 0.0f,
                     status, gyro_good, accel_good,
                     &result) != IMU_STATUS_OK)
         return IMU_STATUS_NUMERICAL_FAULT;
     *f = next;
     *out = result;
-    return status;
+    return result.status;
 }

@@ -369,8 +369,35 @@ static void test_antiparallel_gravity_is_rejected(void)
     TEST_ASSERT_NEAR(out.yaw_rad, 0.1f, 1.0e-6f);
 }
 
+static void test_attitude_epoch(void)
+{
+    imu_config_t c=config(); imu_complementary_t f;
+    imu_sample_t s=sample_at(STEP_NS); imu_output_t out;
+    imu_motion_quality_t q=quality_at(STEP_NS,0); unsigned i;
+    f=identity_filter(&c); process_at(&f,&c,&s,0,&out);
+    TEST_ASSERT(out.attitude_epoch_ns==STEP_NS);
+    for(i=0;i<3;++i)c.gyro_delay_s[i]=0.004f;
+    f=identity_filter(&c); process_at(&f,&c,&s,0,&out);
+    TEST_ASSERT(out.timestamp_ns==STEP_NS && out.attitude_epoch_ns==UINT64_C(96000000));
+    s.timestamp_ns+=UINT64_C(2000000000); q=quality_at(s.timestamp_ns,0);
+    TEST_ASSERT(imu_complementary_process(&f,&c,&s,&q,&out)==IMU_STATUS_TIME_GAP);
+    TEST_ASSERT(out.attitude_epoch_ns==UINT64_C(2096000000));
+    f=identity_filter(&c); s.timestamp_ns=1; q=quality_at(1,0);
+    TEST_ASSERT(imu_complementary_process(&f,&c,&s,&q,&out)==IMU_STATUS_SENSOR_DEGRADED);
+    TEST_ASSERT(out.attitude_epoch_ns==0 && out.timestamp_ns==1 && out.initialized);
+    TEST_ASSERT(out.health_flags&IMU_HEALTH_TIMING_DEGRADED);
+    TEST_ASSERT(out.timing_status==IMU_STATUS_BAD_ARGUMENT);
+    c.gyro_delay_s[1]=0.003f;
+    TEST_ASSERT(imu_complementary_init(&f,&c,(imu_quatf_t){1,0,0,0},
+                (imu_vec3f_t){0,0,0})==IMU_STATUS_BAD_ARGUMENT);
+    for(i=0;i<3;++i)c.gyro_delay_s[i]=FLT_MAX;
+    TEST_ASSERT(imu_complementary_init(&f,&c,(imu_quatf_t){1,0,0,0},
+                (imu_vec3f_t){0,0,0})==IMU_STATUS_BAD_ARGUMENT);
+}
+
 int main(void)
 {
+    test_attitude_epoch();
     test_zero_rate_stability();
     test_known_rate_propagation();
     test_matched_dynamic_pitch_has_no_false_correction();

@@ -2,6 +2,7 @@
 #define IMU_TYPES_H
 
 #include <stdbool.h>
+#include <float.h>
 #include <stdint.h>
 
 /* Body: forward/right/down. Navigation: north/east/down. q_nb maps body to NED. */
@@ -12,6 +13,8 @@
 #define IMU_NOTCH_MAX 4U
 #define IMU_TEMP_POLY_COEFFICIENTS 3U
 #define IMU_CALIBRATION_VERSION 1U
+/* Finite sentinel shared by estimators when Euler sigma is unavailable. */
+#define IMU_UNCERTAINTY_UNAVAILABLE_RAD FLT_MAX
 
 typedef struct { float x, y, z; } imu_vec3f_t;
 /* Scalar-first Hamilton quaternion. */
@@ -82,6 +85,9 @@ typedef struct {
     float nominal_dt_s;
     float min_dt_s;
     float max_dt_s;
+    /* All three entries must be exactly equal, finite, nonnegative and
+     * convertible to uint64 nanoseconds. Sensor-axis time alignment before
+     * calibration mixing is not implemented. Assign one common value. */
     float gyro_delay_s[3];
     float accel_delay_s;
     float max_delay_compensation_s;
@@ -178,7 +184,15 @@ typedef enum {
 #define IMU_HEALTH_UNCERTAINTY_UNAVAILABLE (UINT32_C(1) << 7)
 
 typedef struct {
+    /* Host latch/publication reference, copied from the input frame. */
     uint64_t timestamp_ns;
+    /* timestamp_ns minus common gyro delay rounded to integer nanoseconds.
+     * No prediction to the host latch epoch is performed. Startup underflow
+     * clamps to 0 with TIMING_DEGRADED and timing_status BAD_ARGUMENT; this
+     * is an unavailable physical epoch. Gaps/dropouts advance the nominal
+     * epoch with frozen attitude and degraded status, not observed motion.
+     * Low-level ESKF output leaves timestamps zero for its caller to fill. */
+    uint64_t attitude_epoch_ns;
     imu_quatf_t q_nb;
     float roll_rad;
     float pitch_rad;
@@ -189,7 +203,8 @@ typedef struct {
     float accel_weight;
     /* One-sigma attitude uncertainty, radians, ordered roll/pitch/yaw.
      * If IMU_HEALTH_UNCERTAINTY_UNAVAILABLE is set, all three values are
-     * finite FLT_MAX sentinels and are not estimated standard deviations. */
+     * IMU_UNCERTAINTY_UNAVAILABLE_RAD (finite FLT_MAX) sentinels, not estimated
+     * standard deviations. This includes the Euler pitch singularity. */
     imu_vec3f_t attitude_std_rad;
     imu_fusion_mode_t fusion_mode;
     imu_status_t status;

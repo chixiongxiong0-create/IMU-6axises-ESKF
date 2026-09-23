@@ -8,15 +8,19 @@
 #include <stdlib.h>
 #include <time.h>
 /* Frozen before the first estimator scenario run. Radians and seconds. */
-#define LIMITS 0.05236,0.05236,0.174533,0.034907,4.0,0.349066,0.08,100.0
+#define SCENARIO(label, end_s) { .name=label, \
+    .roll_rms_limit=0.05236, .pitch_rms_limit=0.05236, .peak_limit=0.174533, \
+    .discontinuity_limit=0.034907, .recovery_limit=4.0, .yaw_limit=0.349066, \
+    .bias_limit=0.08, .consistency_limit=100.0, .disturbance_end_s=end_s }
 const imu_scenario_t imu_scenarios[]={
-    {"static_arbitrary",LIMITS,0},{"compound_rotation",LIMITS,0},
-    {"boundary_300_dps",LIMITS,0},{"linear_acceleration",LIMITS,4},
-    {"sustained_turn",LIMITS,8},{"broadband_vibration",LIMITS,8},
-    {"shock",LIMITS,3.02},{"bias_step",LIMITS,4},
-    {"accel_dropout",LIMITS,8},{"recovery",LIMITS,8},
-    {"combined_vibration_bias",LIMITS,8}
+    SCENARIO("static_arbitrary",0),SCENARIO("compound_rotation",0),
+    SCENARIO("boundary_300_dps",0),SCENARIO("linear_acceleration",4),
+    SCENARIO("sustained_turn",8),SCENARIO("broadband_vibration",8),
+    SCENARIO("shock",3.02),SCENARIO("bias_step",4),
+    SCENARIO("accel_dropout",8),SCENARIO("recovery",8),
+    SCENARIO("combined_vibration_bias",8)
 };
+#undef SCENARIO
 const unsigned imu_scenario_count=sizeof imu_scenarios/sizeof imu_scenarios[0];
 void imu_recovery_init(imu_recovery_t *r,double disturbance_end_s)
 { r->start_s=r->last_bad_s=disturbance_end_s; }

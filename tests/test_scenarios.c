@@ -89,11 +89,12 @@ static void scenario_tests(void)
     for(i=0;i<imu_scenario_count;++i) {
         const imu_scenario_t *f=&imu_scenarios[i];
         TEST_ASSERT(imu_run_scenario(i,42,m));
-        printf("%s roll=%.6g pitch=%.6g peak=%.6g recovery=%.6g failures=%u\n",
-               f->name,m[0].roll_rms,m[0].pitch_rms,m[0].peak,m[0].recovery,m[0].failures);
+        printf("%s roll=%.6g pitch=%.6g peak=%.6g yaw_rms=%.6g recovery=%.6g failures=%u\n",
+               f->name,m[0].roll_rms,m[0].pitch_rms,m[0].peak,m[0].yaw_rms,m[0].recovery,m[0].failures);
         TEST_ASSERT(m[0].samples==5821);
         TEST_ASSERT(m[0].roll_rms<f->roll_rms_limit && m[0].pitch_rms<f->pitch_rms_limit);
-        TEST_ASSERT(m[0].peak<f->peak_limit && m[0].yaw_rms<f->yaw_limit);
+        TEST_ASSERT(m[0].peak<f->peak_limit);
+        TEST_ASSERT(m[0].yaw_rms<f->yaw_limit);
         TEST_ASSERT(m[0].recovery<=f->recovery_limit);
         TEST_ASSERT(m[0].failures==0 && m[0].discontinuities==0 && m[0].unreported_degraded==0);
         TEST_ASSERT(m[0].bias_error<f->bias_limit && m[0].consistency_max<f->consistency_limit);
@@ -115,6 +116,19 @@ static void recovery_tests(void)
         TEST_ASSERT_NEAR(imu_recovery_result(&r,12),expected[i],1e-12);
         imu_recovery_observe(&r,11.75,0.04);
         TEST_ASSERT(isinf(imu_recovery_result(&r,12)));
+    }
+}
+/* Locks the field mapping that the old positional initializer obscured.
+ * In particular, 0.062285 yaw RMS passes while a 0.04 jump is counted. */
+static void frozen_limit_mapping(void)
+{
+    unsigned i;
+    for(i=0;i<imu_scenario_count;++i) {
+        TEST_ASSERT(imu_scenarios[i].yaw_limit==0.349066);
+        TEST_ASSERT(imu_scenarios[i].discontinuity_limit==0.034907);
+        TEST_ASSERT(imu_scenarios[i].peak_limit==0.174533);
+        TEST_ASSERT(0.062285<imu_scenarios[i].yaw_limit);
+        TEST_ASSERT(0.04>imu_scenarios[i].discontinuity_limit);
     }
 }
 static void comparison_test(void)
@@ -149,6 +163,7 @@ int main(int argc,char **argv)
     else if(argc==2 && strcmp(argv[1],"--simulator")==0) simulator_tests();
     else if(argc==2 && strcmp(argv[1],"--comparison")==0) comparison_test();
     else if(argc==2 && strcmp(argv[1],"--recovery")==0) recovery_tests();
+    else if(argc==2 && strcmp(argv[1],"--limits")==0) frozen_limit_mapping();
     else scenario_tests();
     return test_summary();
 }

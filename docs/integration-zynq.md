@@ -14,6 +14,10 @@ Configure ADXL355 `ODR_LPF=0x3` (**500 Hz/125 Hz**) and `EXT_SYNC=10`, `EXT_CLK=
 
 Use measured board signal-chain delays where available. Nominal starting values are **4.00 ms** for each ADXRS453 rate path and **5.27 ms** for the ADXL355 interpolation/decimation path. Set `config.gyro_delay_s[0..2]` and `config.accel_delay_s` before `imu_init`. The difference, about 1.27 ms with these nominal values, is within the default `max_delay_compensation_s=0.01`. The library applies a bounded constant-rate rotation approximation between acceleration and gyro ages. Its defaults leave all delays at zero, so explicitly configure them; do not subtract the same delay in the driver. The latch timestamps remain in the same monotonic epoch as `sample.timestamp_ns`; the adapter must account for sequential-read skew. These group delays describe signal filtering, while per-device latch times describe acquisition timing.
 
+All three `gyro_delay_s` entries must contain exactly the same finite, nonnegative value. Assign the same common delay to all entries; `imu_init` rejects unequal values, including with nonidentity sensor calibration or board rotation. The core cannot time-align independently delayed sensor axes before those matrices mix them. No tolerance is used because differing ages are unsupported, rather than a roundoff comparison inside a numerical algorithm. Common delays must also fit a `uint64_t` nanosecond duration. The existing relative acceleration-to-gyro compensation still applies.
+
+`output.timestamp_ns` remains the input host latch/publication reference. `output.attitude_epoch_ns` is that timestamp minus the common gyro delay rounded to integer nanoseconds: a frame at 1,000,000,000 ns with 4 ms gyro delay reports attitude at 996,000,000 ns. There is no prediction from the gyro epoch to the host latch epoch. A known initial quaternion must describe the first accepted frame's physical gyro epoch. If the host clock starts below the configured delay, the physical epoch cannot be represented: it is clamped to zero, `IMU_HEALTH_TIMING_DEGRADED` is set, `timing_status` is `BAD_ARGUMENT`, and an otherwise OK frame returns `SENSOR_DEGRADED` with valid attitude. A time gap retains `TIME_GAP` precedence. Once the clock covers the delay, ordinary epoch reporting resumes. On gaps or gyro dropout the nominal epoch advances while quaternion motion is frozen and covariance grows; the degraded flags explicitly distinguish that estimate from observed motion. Log both timestamps.
+
 ## Build and frame contract
 
 Compile the `imu` CMake library for the Zynq target as C99 with the target floating-point ABI. Allocate the `imu_t` in persistent application storage; avoid copying it in the scheduler. The library allocates no heap storage. Supply one complete `imu_sample_t` per host frame, including all temperatures, statuses, and freshness fields. Gyro rates are in **rad/s** and acceleration is in **m/s²**. Temperatures are in °C. Driver conversion from device words to SI units precedes calibration in the library. A level stationary sensor in the FRD body frame reports specific force approximately `[0, 0, -9.80665] m/s²`; feeding `[0, 0, +g]` reverses the attitude observation.
@@ -87,7 +91,7 @@ The output includes `fusion_mode` (`INVALID`, `ALIGNING`, `GYRO_ONLY`, `GRAVITY`
 | --- | --- |
 | `IMU_HEALTH_GYRO_DEGRADED` | One or more gyro measurements unusable. |
 | `IMU_HEALTH_ACCEL_DEGRADED` | Accelerometer observation unusable or rejected. |
-| `IMU_HEALTH_TIMING_DEGRADED` | Input interval exceeded configured maximum. |
+| `IMU_HEALTH_TIMING_DEGRADED` | Input interval exceeded configured maximum, or startup time cannot represent the delayed attitude epoch. |
 | `IMU_HEALTH_UNCALIBRATED` | Explicit diagnostic calibration fallback. |
 | `IMU_HEALTH_NUMERICAL_FAULT` | Latched estimator numerical fault. |
 | `IMU_HEALTH_HEADING_UNOBSERVABLE` | Absolute heading is unavailable. |
@@ -95,6 +99,8 @@ The output includes `fusion_mode` (`INVALID`, `ALIGNING`, `GYRO_ONLY`, `GRAVITY`
 | `IMU_HEALTH_UNCERTAINTY_UNAVAILABLE` | `attitude_std_rad` contains finite `FLT_MAX` sentinels, not standard deviations. |
 
 `imu_update_magnetometer` currently validates pointers and finite field components, then returns `IMU_STATUS_AIDING_UNAVAILABLE` without changing estimator state. Neither a fresh magnetic sample nor a healthy status enables heading aiding. Treat yaw and its uncertainty as relative until a future implemented heading observation is explicitly verified.
+
+At pitch near ±90 degrees the Euler uncertainty Jacobian is singular. This does not invalidate the quaternion or latch a numerical fault: all three Euler sigma fields use the shared finite `IMU_UNCERTAINTY_UNAVAILABLE_RAD` sentinel and the unavailable-uncertainty health bit. Euler roll/yaw coordinates are ambiguous there; use the quaternion. Ordinary Euler uncertainty resumes after leaving the singularity. Invalid quaternion/covariance remains a hard numerical fault.
 
 ## Bring-up checks
 

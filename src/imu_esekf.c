@@ -368,6 +368,7 @@ imu_status_t imu_esekf_get_output(const imu_esekf_t *f, imu_output_t *out)
     imu_vec3f_t euler;
     float jacobian[3][3], variance[3] = {0};
     float sr, cr, cp, tp;
+    bool uncertainty_unavailable;
     unsigned i, j, k;
     imu_status_t status;
     if (out == NULL) return IMU_STATUS_BAD_ARGUMENT;
@@ -376,17 +377,22 @@ imu_status_t imu_esekf_get_output(const imu_esekf_t *f, imu_output_t *out)
     if (!imu_quat_to_euler_ned(f->q_nb, &euler)) return IMU_STATUS_NUMERICAL_FAULT;
     sr = sinf(euler.x); cr = cosf(euler.x); cp = cosf(euler.y);
     /* Euler uncertainty is singular at pitch +/-pi/2. Quaternion remains valid. */
-    if (fabsf(cp) < 1e-5f) return IMU_STATUS_NUMERICAL_FAULT;
-    tp = sinf(euler.y)/cp;
-    jacobian[0][0] = 1; jacobian[0][1] = sr*tp; jacobian[0][2] = cr*tp;
-    jacobian[1][0] = 0; jacobian[1][1] = cr; jacobian[1][2] = -sr;
-    jacobian[2][0] = 0; jacobian[2][1] = sr/cp; jacobian[2][2] = cr/cp;
-    for (i = 0; i < 3; ++i) {
-        for (j = 0; j < 3; ++j)
-            for (k = 0; k < 3; ++k)
-                variance[i] += jacobian[i][j]*f->P[j][k]*jacobian[i][k];
-        if (!isfinite(variance[i]) || variance[i] <= 0)
-            return IMU_STATUS_NUMERICAL_FAULT;
+    /* Use the quaternion's gravity projection: asin rounding can hide the
+     * singularity by giving cos(pitch) about 3e-4 for a vertical quaternion. */
+    uncertainty_unavailable = hypotf(2*(f->q_nb.w*f->q_nb.x+f->q_nb.y*f->q_nb.z),
+        1-2*(f->q_nb.x*f->q_nb.x+f->q_nb.y*f->q_nb.y)) < 1e-5f || fabsf(cp) < 1e-5f;
+    if (!uncertainty_unavailable) {
+        tp = sinf(euler.y)/cp;
+        jacobian[0][0] = 1; jacobian[0][1] = sr*tp; jacobian[0][2] = cr*tp;
+        jacobian[1][0] = 0; jacobian[1][1] = cr; jacobian[1][2] = -sr;
+        jacobian[2][0] = 0; jacobian[2][1] = sr/cp; jacobian[2][2] = cr/cp;
+        for (i = 0; i < 3; ++i) {
+            for (j = 0; j < 3; ++j)
+                for (k = 0; k < 3; ++k)
+                    variance[i] += jacobian[i][j]*f->P[j][k]*jacobian[i][k];
+            if (!isfinite(variance[i]) || variance[i] <= 0)
+                return IMU_STATUS_NUMERICAL_FAULT;
+        }
     }
     memset(&next, 0, sizeof(next));
     next.q_nb = f->q_nb;
@@ -397,6 +403,11 @@ imu_status_t imu_esekf_get_output(const imu_esekf_t *f, imu_output_t *out)
                                        sqrtf(variance[2])};
     next.initialized = true;
     next.health_flags = IMU_HEALTH_HEADING_UNOBSERVABLE;
+    if (uncertainty_unavailable) {
+        next.attitude_std_rad = (imu_vec3f_t){IMU_UNCERTAINTY_UNAVAILABLE_RAD,
+            IMU_UNCERTAINTY_UNAVAILABLE_RAD, IMU_UNCERTAINTY_UNAVAILABLE_RAD};
+        next.health_flags |= IMU_HEALTH_UNCERTAINTY_UNAVAILABLE;
+    }
     next.status = IMU_STATUS_OK;
     next.fusion_mode = IMU_FUSION_GYRO_ONLY;
     *out = next;

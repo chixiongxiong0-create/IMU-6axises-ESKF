@@ -24,6 +24,10 @@ imu_status_t imu_complementary_init(imu_complementary_t *filter,
  * sample, obtained by the common motion-quality path. The first frame sets
  * the epoch without integrating. Nonfinite and invalid time leave all caller
  * storage unchanged. Gaps and missing gyros consume time but freeze attitude.
+ * All configured gyro delays must be exactly equal. Input acceleration is
+ * already aligned by the caller to that common gyro epoch. Output timestamps
+ * use the shared imu_output_t delay/underflow contract; an epoch underflow
+ * turns otherwise OK output into SENSOR_DEGRADED, preserving valid attitude.
  * Stale/faulted acceleration receives zero correction. Yaw is relative only.
  * Output calibration_valid is true for the caller-supplied calibrated input.
  * With no covariance, attitude_std_rad uses finite FLT_MAX sentinels and

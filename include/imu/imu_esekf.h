@@ -49,7 +49,9 @@ imu_status_t imu_esekf_update_zero_rate(imu_esekf_t *filter,
  * modes return NUMERICAL_FAULT transactionally. */
 bool imu_esekf_covariance_valid(const imu_esekf_t *filter);
 /* Populates attitude, bias, last corrected rate and Euler-angle uncertainty.
- * Returns NUMERICAL_FAULT at the Euler pitch singularity (|cos(pitch)|<1e-5).
+ * At the Euler pitch singularity (|cos(pitch)|<1e-5), attitude remains valid;
+ * all Euler sigmas use IMU_UNCERTAINTY_UNAVAILABLE_RAD and the health flag.
+ * Invalid quaternion/covariance still returns NUMERICAL_FAULT.
  * Timestamp, quality/mode, calibration, and sensor diagnostics are lifecycle
  * caller fields: initially zero/GYRO_ONLY here. Heading-unobservable is set. */
 imu_status_t imu_esekf_get_output(const imu_esekf_t *filter, imu_output_t *out);

@@ -2,6 +2,7 @@
 #include "imu/imu.h"
 #include "imu/imu_math.h"
 #include <string.h>
+#include <float.h>
 
 static imu_calibration_t calibration(void)
 {
@@ -273,6 +274,8 @@ static void delay_compensation(void)
         s=sample_at(i); s.gyro_rad_s[2]=0.2f;
         (void)imu_process(&imu,&s,&out); (void)imu_process(&equal,&s,&same);
     }
+    TEST_ASSERT(out.attitude_epoch_ns-same.attitude_epoch_ns==UINT64_C(5000000));
+    same.attitude_epoch_ns=out.attitude_epoch_ns;
     TEST_ASSERT(memcmp(&out,&same,sizeof out)==0);
 }
 
@@ -303,8 +306,105 @@ static void alignment_requires_current_static_qualification(void)
     TEST_ASSERT(out.initialized);
 }
 
+/* A coordinate singularity must not invalidate a valid quaternion or latch
+ * FAULT; a dynamic crossing must also restore ordinary Euler uncertainty. */
+static void vertical_attitude(void)
+{
+    imu_t imu={0}; imu_config_t c; imu_calibration_t cal=calibration();
+    imu_output_t out={0}; imu_sample_t s; unsigned sign,i;
+    for(sign=0;sign<2;++sign) {
+        const float direction=sign? -1.0f:1.0f;
+        imu_config_defaults(&c); c.init_mode=IMU_INIT_QUATERNION;
+        c.initial_q_nb=(imu_quatf_t){0.5f,0.5f,direction*0.5f,-direction*0.5f};
+        TEST_ASSERT(imu_init(&imu,&c,&cal)); s=sample_at(0);
+        TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+        TEST_ASSERT(out.initialized && imu.state==IMU_STATE_RUNNING);
+        TEST_ASSERT(out.health_flags&IMU_HEALTH_UNCERTAINTY_UNAVAILABLE);
+        TEST_ASSERT(out.attitude_std_rad.x==FLT_MAX &&
+                    out.attitude_std_rad.y==FLT_MAX && out.attitude_std_rad.z==FLT_MAX);
+        TEST_ASSERT_NEAR(imu_quat_norm(out.q_nb),1,1e-6f);
+        /* Begin 0.002 rad before vertical; two 2 ms steps at 1 rad/s cross it. */
+        c.initial_q_nb=(imu_quatf_t){cosf(0.785398163f-0.001f),0,
+                                    direction*sinf(0.785398163f-0.001f),0};
+        TEST_ASSERT(imu_init(&imu,&c,&cal)); s=sample_at(0);
+        TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+        for(i=1;i<=2;++i) {
+            s.timestamp_ns+=UINT64_C(2000000); s.gyro_rad_s[1]=direction;
+            s.accel_sample_fresh=false;
+            TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_SENSOR_DEGRADED);
+            TEST_ASSERT(out.initialized && imu.state==IMU_STATE_DEGRADED);
+            TEST_ASSERT(!(out.health_flags&IMU_HEALTH_NUMERICAL_FAULT));
+            TEST_ASSERT_NEAR(imu_quat_norm(out.q_nb),1,1e-6f);
+            if(i==1) TEST_ASSERT(out.health_flags&IMU_HEALTH_UNCERTAINTY_UNAVAILABLE);
+            else TEST_ASSERT(!(out.health_flags&IMU_HEALTH_UNCERTAINTY_UNAVAILABLE));
+        }
+    }
+}
+
+/* Per-sensor ages cannot be attached to body axes after matrix mixing. */
+static void unequal_gyro_delays_rejected(void)
+{
+    imu_t imu={0},before; imu_config_t c; imu_calibration_t cal=calibration();
+    unsigned i;
+    imu_config_defaults(&c);
+    cal.gyro_scale_alignment[0][1]=0.1f;
+    cal.body_rotation[0][0]=0; cal.body_rotation[0][1]=-1;
+    cal.body_rotation[1][0]=1; cal.body_rotation[1][1]=0;
+    c.accel_delay_s=0.00527f;
+    for(i=0;i<3;++i)c.gyro_delay_s[i]=0.004f;
+    TEST_ASSERT(imu_init(&imu,&c,&cal)); before=imu;
+    for(i=0;i<3;++i) {
+        c.gyro_delay_s[i]=0.003f;
+        TEST_ASSERT(!imu_init(&imu,&c,&cal));
+        TEST_ASSERT(memcmp(&imu,&before,sizeof imu)==0);
+        c.gyro_delay_s[i]=0.004f;
+    }
+}
+
+/* Catches reporting the host latch as the physical epoch, wrapping startup
+ * subtraction, reusing an old epoch through a gap, and overflowing conversion. */
+static void attitude_epochs(void)
+{
+    imu_t imu={0}; imu_config_t c; imu_calibration_t cal=calibration();
+    imu_output_t out={0}; imu_sample_t s=sample_at(0); unsigned i;
+    imu_config_defaults(&c); c.init_mode=IMU_INIT_QUATERNION;
+    TEST_ASSERT(imu_init(&imu,&c,&cal));
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+    TEST_ASSERT(out.timestamp_ns==UINT64_C(1000000000));
+    TEST_ASSERT(out.attitude_epoch_ns==UINT64_C(1000000000));
+    for(i=0;i<3;++i)c.gyro_delay_s[i]=0.004f;
+    c.accel_delay_s=0.00527f;
+    TEST_ASSERT(imu_init(&imu,&c,&cal));
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+    TEST_ASSERT(out.timestamp_ns==UINT64_C(1000000000));
+    TEST_ASSERT(out.attitude_epoch_ns==UINT64_C(996000000));
+    s.timestamp_ns+=UINT64_C(100000000); s.gyro_rad_s[2]=1;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_TIME_GAP);
+    TEST_ASSERT(out.attitude_epoch_ns==UINT64_C(1096000000));
+    TEST_ASSERT_NEAR(out.yaw_rad,0,1e-7f);
+    s.timestamp_ns+=UINT64_C(2000000); s.gyro_sample_fresh[0]=false;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_SENSOR_DEGRADED);
+    TEST_ASSERT(out.attitude_epoch_ns==UINT64_C(1098000000));
+    TEST_ASSERT_NEAR(out.yaw_rad,0,1e-7f);
+    TEST_ASSERT(imu_init(&imu,&c,&cal)); s=sample_at(0); s.timestamp_ns=1;
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_SENSOR_DEGRADED);
+    TEST_ASSERT(out.initialized && out.attitude_epoch_ns==0 && out.timestamp_ns==1);
+    TEST_ASSERT(out.health_flags&IMU_HEALTH_TIMING_DEGRADED);
+    TEST_ASSERT(out.timing_status==IMU_STATUS_BAD_ARGUMENT);
+    s.timestamp_ns=UINT64_C(4000001);
+    TEST_ASSERT(imu_process(&imu,&s,&out)==IMU_STATUS_OK);
+    TEST_ASSERT(out.attitude_epoch_ns==1);
+    TEST_ASSERT(!(out.health_flags&IMU_HEALTH_TIMING_DEGRADED));
+    for(i=0;i<3;++i)c.gyro_delay_s[i]=FLT_MAX;
+    c.accel_delay_s=FLT_MAX;
+    TEST_ASSERT(!imu_init(&imu,&c,&cal));
+}
+
 int main(void)
 {
+    attitude_epochs();
+    unequal_gyro_delays_rejected();
+    vertical_attitude();
     initialization();
     timing_and_freshness();
     observation_failure_and_fault();

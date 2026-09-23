@@ -72,6 +72,11 @@ static void test_zero_rate_stability(void)
                 f.q_nb.y == 0.0f && f.q_nb.z == 0.0f);
     TEST_ASSERT(out.initialized);
     TEST_ASSERT((out.health_flags & IMU_HEALTH_HEADING_UNOBSERVABLE) != 0U);
+    TEST_ASSERT(out.calibration_valid);
+    TEST_ASSERT((out.health_flags & IMU_HEALTH_UNCALIBRATED) == 0U);
+    TEST_ASSERT(isnan(out.attitude_std_rad.x));
+    TEST_ASSERT(isnan(out.attitude_std_rad.y));
+    TEST_ASSERT(isnan(out.attitude_std_rad.z));
 }
 
 /* Catches a fixed nominal period or the wrong quaternion multiplication. */
@@ -83,13 +88,33 @@ static void test_known_rate_propagation(void)
     imu_sample_t s = sample_at(STEP_NS);
     c.complementary_kp = 0.0f;
     c.complementary_ki = 0.0f;
-    process_at(&f, &c, &s, 0.0f, &out);
-    s.timestamp_ns += STEP_NS;
     s.gyro_rad_s[2] = 1.0f;
+    process_at(&f, &c, &s, 0.0f, &out);
+    TEST_ASSERT_NEAR(out.angular_rate_rad_s.z, 1.0f, 0.0f);
+    TEST_ASSERT_NEAR(out.yaw_rad, 0.0f, 0.0f);
+    s.timestamp_ns += STEP_NS;
     process_at(&f, &c, &s, 0.0f, &out);
     TEST_ASSERT_NEAR(f.q_nb.w, cosf(0.05f), 1.0e-6f);
     TEST_ASSERT_NEAR(f.q_nb.z, sinf(0.05f), 1.0e-6f);
     TEST_ASSERT_NEAR(out.yaw_rad, 0.1f, 1.0e-6f);
+}
+
+/* Catches comparing current acceleration against the previous-frame attitude:
+ * exact pitch motion has no gravity innovation at the sample epoch. */
+static void test_matched_dynamic_pitch_has_no_false_correction(void)
+{
+    const imu_config_t c = config();
+    imu_complementary_t f = identity_filter(&c);
+    imu_output_t out;
+    imu_sample_t s = sample_at(STEP_NS);
+    process_at(&f, &c, &s, 1.0f, &out);
+    s.timestamp_ns += STEP_NS;
+    s.gyro_rad_s[1] = 1.0f;
+    s.accel_m_s2[0] = 9.80665f*sinf(0.1f);
+    s.accel_m_s2[2] = -9.80665f*cosf(0.1f);
+    process_at(&f, &c, &s, 1.0f, &out);
+    TEST_ASSERT_NEAR(out.pitch_rad, 0.1f, 1.0e-5f);
+    TEST_ASSERT_NEAR(out.gyro_bias_rad_s.y, 0.0f, 1.0e-6f);
 }
 
 /* Catches missing quality scaling, a sign reversal, and corrections at zero
@@ -112,8 +137,8 @@ static void test_gravity_correction_uses_shared_weight(void)
     process_at(&full, &c, &s, 1.0f, &out);
     process_at(&half, &c, &s, 0.5f, &out);
     process_at(&none, &c, &s, 0.0f, &out);
-    TEST_ASSERT_NEAR(full.angular_rate_rad_s.y, 2.0f*sinf(0.2f), 1.0e-6f);
-    TEST_ASSERT_NEAR(half.angular_rate_rad_s.y, sinf(0.2f), 1.0e-6f);
+    TEST_ASSERT_NEAR(2.0f*asinf(full.q_nb.y), 0.2f*sinf(0.2f), 1.0e-6f);
+    TEST_ASSERT_NEAR(2.0f*asinf(half.q_nb.y), 0.1f*sinf(0.2f), 1.0e-6f);
     TEST_ASSERT_NEAR(none.q_nb.y, 0.0f, 0.0f);
     TEST_ASSERT_NEAR(none.gyro_bias_rad_s.y, 0.0f, 0.0f);
 }
@@ -136,8 +161,8 @@ static void test_yaw_is_relative(void)
     TEST_ASSERT((out.health_flags & IMU_HEALTH_HEADING_UNOBSERVABLE) != 0U);
 }
 
-/* Catches unbounded integral windup under a persistent tilted observation. */
-static void test_integral_bias_is_clamped(void)
+/* Catches a bias increment exceeding the shared per-update limit. */
+static void test_integral_bias_step_is_clamped(void)
 {
     imu_config_t c = config();
     imu_complementary_t f = identity_filter(&c);
@@ -148,14 +173,59 @@ static void test_integral_bias_is_clamped(void)
     c.complementary_ki = 10.0f;
     process_at(&f, &c, &s, 1.0f, &out);
     for (i = 0U; i < 20U; ++i) {
+        const imu_vec3f_t before = f.gyro_bias_rad_s;
         s.timestamp_ns += STEP_NS;
         s.accel_m_s2[0] = 9.80665f * sinf(0.2f);
         s.accel_m_s2[2] = -9.80665f * cosf(0.2f);
         process_at(&f, &c, &s, 1.0f, &out);
+        TEST_ASSERT(imu_vec3_norm((imu_vec3f_t){
+            f.gyro_bias_rad_s.x - before.x,
+            f.gyro_bias_rad_s.y - before.y,
+            f.gyro_bias_rad_s.z - before.z}) <=
+            c.max_bias_step_rad_s + 1.0e-7f);
     }
-    TEST_ASSERT(imu_vec3_norm(f.gyro_bias_rad_s) <=
-                c.max_bias_step_rad_s + 1.0e-7f);
     TEST_ASSERT(f.gyro_bias_rad_s.y < 0.0f);
+}
+
+/* Catches interpreting max_bias_step_rad_s as a lifetime learned-bias cap. */
+static void test_bias_learns_beyond_one_step(void)
+{
+    imu_config_t c = config();
+    imu_complementary_t f = identity_filter(&c);
+    imu_output_t out;
+    imu_sample_t s = sample_at(STEP_NS);
+    c.complementary_kp = 0.0f;
+    c.complementary_ki = 10.0f;
+    c.max_bias_step_rad_s = 0.005f;
+    process_at(&f, &c, &s, 1.0f, &out);
+    s.accel_m_s2[0] = 9.80665f*sinf(0.2f);
+    s.accel_m_s2[2] = -9.80665f*cosf(0.2f);
+    s.timestamp_ns += STEP_NS;
+    process_at(&f, &c, &s, 1.0f, &out);
+    TEST_ASSERT_NEAR(f.gyro_bias_rad_s.y, -0.005f, 1.0e-7f);
+    s.timestamp_ns += STEP_NS;
+    process_at(&f, &c, &s, 1.0f, &out);
+    TEST_ASSERT_NEAR(f.gyro_bias_rad_s.y, -0.010f, 1.0e-7f);
+    TEST_ASSERT_NEAR(out.angular_rate_rad_s.y,
+                     -f.gyro_bias_rad_s.y, 1.0e-7f);
+}
+
+/* Catches publishing the artificial proportional feedback as measured rate. */
+static void test_published_rate_excludes_feedback(void)
+{
+    imu_config_t c = config();
+    imu_complementary_t f = identity_filter(&c);
+    imu_output_t out;
+    imu_sample_t s = sample_at(STEP_NS);
+    c.complementary_ki = 0.0f;
+    process_at(&f, &c, &s, 1.0f, &out);
+    s.timestamp_ns += STEP_NS;
+    s.gyro_rad_s[1] = 0.1f;
+    s.accel_m_s2[0] = 9.80665f*sinf(0.2f);
+    s.accel_m_s2[2] = -9.80665f*cosf(0.2f);
+    process_at(&f, &c, &s, 1.0f, &out);
+    TEST_ASSERT_NEAR(out.angular_rate_rad_s.y, 0.1f, 1.0e-6f);
+    TEST_ASSERT(out.pitch_rad > 0.01f);
 }
 
 /* Catches zero gain acting on gravity or rejecting valid gain boundaries. */
@@ -296,9 +366,12 @@ int main(void)
 {
     test_zero_rate_stability();
     test_known_rate_propagation();
+    test_matched_dynamic_pitch_has_no_false_correction();
     test_gravity_correction_uses_shared_weight();
     test_yaw_is_relative();
-    test_integral_bias_is_clamped();
+    test_integral_bias_step_is_clamped();
+    test_bias_learns_beyond_one_step();
+    test_published_rate_excludes_feedback();
     test_zero_and_negative_gains();
     test_stale_acceleration_and_recovery();
     test_nonfinite_and_time_guards();

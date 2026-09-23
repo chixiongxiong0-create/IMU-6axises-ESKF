@@ -71,6 +71,8 @@ static imu_status_t fill_output(const imu_complementary_t *f,
     out->yaw_rad = euler.z;
     out->angular_rate_rad_s = f->angular_rate_rad_s;
     out->gyro_bias_rad_s = f->gyro_bias_rad_s;
+    /* Benchmark has no covariance: NaN means uncertainty is unavailable. */
+    out->attitude_std_rad = (imu_vec3f_t){NAN, NAN, NAN};
     out->accel_weight = accel_good ? shared_weight : 0.0f;
     out->fusion_mode = corrected &&
                        status == IMU_STATUS_OK ? IMU_FUSION_GRAVITY :
@@ -79,6 +81,7 @@ static imu_status_t fill_output(const imu_complementary_t *f,
     out->timing_status = status == IMU_STATUS_TIME_GAP ?
                          IMU_STATUS_TIME_GAP : IMU_STATUS_OK;
     out->initialized = true;
+    out->calibration_valid = true;
     out->health_flags = IMU_HEALTH_HEADING_UNOBSERVABLE;
     if (!gyro_good) out->health_flags |= IMU_HEALTH_GYRO_DEGRADED;
     if (!accel_good) out->health_flags |= IMU_HEALTH_ACCEL_DEGRADED;
@@ -103,7 +106,6 @@ imu_status_t imu_complementary_init(imu_complementary_t *f,
     memset(&next, 0, sizeof(next));
     next.q_nb = q_nb;
     next.gyro_bias_rad_s = bias;
-    next.initial_gyro_bias_rad_s = bias;
     next.initialized = true;
     *f = next;
     return IMU_STATUS_OK;
@@ -127,7 +129,6 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
         return IMU_STATUS_BAD_ARGUMENT;
     if (!f->initialized) return IMU_STATUS_NOT_INITIALIZED;
     if (!finite_quat(f->q_nb) || !finite_vec(f->gyro_bias_rad_s) ||
-        !finite_vec(f->initial_gyro_bias_rad_s) ||
         !finite_vec(f->angular_rate_rad_s) || !sample_finite(s) ||
         !isfinite(quality->accel_weight)) return IMU_STATUS_NONFINITE;
     if (!config_valid(c) || quality->accel_weight < 0.0f ||
@@ -158,7 +159,8 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
         rate = (imu_vec3f_t){s->gyro_rad_s[0] - f->gyro_bias_rad_s.x,
                              s->gyro_rad_s[1] - f->gyro_bias_rad_s.y,
                              s->gyro_rad_s[2] - f->gyro_bias_rad_s.z};
-        if (!finite_vec(rate)) return IMU_STATUS_NUMERICAL_FAULT;
+        if (!finite_vec(rate) || !imu_quat_integrate(&next.q_nb, rate, dt))
+            return IMU_STATUS_NUMERICAL_FAULT;
         if (accel_good && quality->accel_weight >= c->accel_weight_min &&
             quality->accel_weight > 0.0f) {
             measured = (imu_vec3f_t){s->accel_m_s2[0], s->accel_m_s2[1],
@@ -167,7 +169,7 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
             if (!isfinite(norm)) return IMU_STATUS_NUMERICAL_FAULT;
             if (norm > 1.0e-12f) {
                 measured.x /= norm; measured.y /= norm; measured.z /= norm;
-                if (!imu_quat_rotate(imu_quat_conjugate(f->q_nb),
+                if (!imu_quat_rotate(imu_quat_conjugate(next.q_nb),
                                      (imu_vec3f_t){0,0,-1}, &predicted))
                     return IMU_STATUS_NUMERICAL_FAULT;
                 /* Same z cross h residual and hemisphere guard as the ESKF. */
@@ -178,9 +180,9 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
                                                 c->complementary_kp*weight*residual.y,
                                                 c->complementary_kp*weight*residual.z};
                     integral = (imu_vec3f_t){
-                        f->gyro_bias_rad_s.x - c->complementary_ki*weight*residual.x*dt - f->initial_gyro_bias_rad_s.x,
-                        f->gyro_bias_rad_s.y - c->complementary_ki*weight*residual.y*dt - f->initial_gyro_bias_rad_s.y,
-                        f->gyro_bias_rad_s.z - c->complementary_ki*weight*residual.z*dt - f->initial_gyro_bias_rad_s.z};
+                        -c->complementary_ki*weight*residual.x*dt,
+                        -c->complementary_ki*weight*residual.y*dt,
+                        -c->complementary_ki*weight*residual.z*dt};
                     integral_norm = imu_vec3_norm(integral);
                     if (!finite_vec(correction) || !finite_vec(integral) ||
                         !isfinite(integral_norm)) return IMU_STATUS_NUMERICAL_FAULT;
@@ -189,11 +191,11 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
                         integral.x *= scale; integral.y *= scale; integral.z *= scale;
                     }
                     next.gyro_bias_rad_s = (imu_vec3f_t){
-                        f->initial_gyro_bias_rad_s.x + integral.x,
-                        f->initial_gyro_bias_rad_s.y + integral.y,
-                        f->initial_gyro_bias_rad_s.z + integral.z};
-                    rate.x += correction.x; rate.y += correction.y;
-                    rate.z += correction.z;
+                        f->gyro_bias_rad_s.x + integral.x,
+                        f->gyro_bias_rad_s.y + integral.y,
+                        f->gyro_bias_rad_s.z + integral.z};
+                    if (!imu_quat_integrate(&next.q_nb, correction, dt))
+                        return IMU_STATUS_NUMERICAL_FAULT;
                 } else {
                     accel_good = false;
                 }
@@ -203,10 +205,21 @@ imu_status_t imu_complementary_process(imu_complementary_t *f,
             if (!accel_good && status == IMU_STATUS_OK)
                 status = IMU_STATUS_SENSOR_DEGRADED;
         }
-        if (!finite_vec(rate) || !finite_vec(next.gyro_bias_rad_s) ||
-            !imu_quat_integrate(&next.q_nb, rate, dt))
+        if (!finite_vec(rate) || !finite_vec(next.gyro_bias_rad_s))
             return IMU_STATUS_NUMERICAL_FAULT;
-        next.angular_rate_rad_s = rate;
+        next.angular_rate_rad_s = (imu_vec3f_t){
+            s->gyro_rad_s[0] - next.gyro_bias_rad_s.x,
+            s->gyro_rad_s[1] - next.gyro_bias_rad_s.y,
+            s->gyro_rad_s[2] - next.gyro_bias_rad_s.z};
+        if (!finite_vec(next.angular_rate_rad_s))
+            return IMU_STATUS_NUMERICAL_FAULT;
+    } else if (gyro_good && status != IMU_STATUS_TIME_GAP) {
+        next.angular_rate_rad_s = (imu_vec3f_t){
+            s->gyro_rad_s[0] - next.gyro_bias_rad_s.x,
+            s->gyro_rad_s[1] - next.gyro_bias_rad_s.y,
+            s->gyro_rad_s[2] - next.gyro_bias_rad_s.z};
+        if (!finite_vec(next.angular_rate_rad_s))
+            return IMU_STATUS_NUMERICAL_FAULT;
     } else {
         next.angular_rate_rad_s = (imu_vec3f_t){0,0,0};
     }

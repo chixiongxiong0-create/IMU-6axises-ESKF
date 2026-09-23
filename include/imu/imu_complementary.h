@@ -26,7 +26,8 @@ imu_status_t imu_complementary_init(imu_complementary_t *filter,
  * storage unchanged. Gaps and missing gyros consume time but freeze attitude.
  * Stale/faulted acceleration receives zero correction. Yaw is relative only.
  * Output calibration_valid is true for the caller-supplied calibrated input.
- * attitude_std_rad is NaN on every axis: this benchmark has no covariance. */
+ * With no covariance, attitude_std_rad uses finite FLT_MAX sentinels and
+ * IMU_HEALTH_UNCERTAINTY_UNAVAILABLE is set; these are not one-sigma values. */
 imu_status_t imu_complementary_process(imu_complementary_t *filter,
                                        const imu_config_t *config,
                                        const imu_sample_t *sample,

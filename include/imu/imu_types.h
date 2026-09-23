@@ -175,6 +175,7 @@ typedef enum {
 #define IMU_HEALTH_NUMERICAL_FAULT        (UINT32_C(1) << 4)
 #define IMU_HEALTH_HEADING_UNOBSERVABLE   (UINT32_C(1) << 5)
 #define IMU_HEALTH_TEMPERATURE_EXTRAPOLATED (UINT32_C(1) << 6)
+#define IMU_HEALTH_UNCERTAINTY_UNAVAILABLE (UINT32_C(1) << 7)
 
 typedef struct {
     uint64_t timestamp_ns;
@@ -186,7 +187,9 @@ typedef struct {
     imu_vec3f_t angular_rate_rad_s;
     imu_vec3f_t gyro_bias_rad_s;
     float accel_weight;
-    /* One-sigma attitude uncertainty, radians, ordered roll/pitch/yaw. */
+    /* One-sigma attitude uncertainty, radians, ordered roll/pitch/yaw.
+     * If IMU_HEALTH_UNCERTAINTY_UNAVAILABLE is set, all three values are
+     * finite FLT_MAX sentinels and are not estimated standard deviations. */
     imu_vec3f_t attitude_std_rad;
     imu_fusion_mode_t fusion_mode;
     imu_status_t status;

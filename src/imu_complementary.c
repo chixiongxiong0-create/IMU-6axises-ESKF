@@ -2,6 +2,7 @@
 
 #include "imu/imu_math.h"
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
@@ -71,8 +72,8 @@ static imu_status_t fill_output(const imu_complementary_t *f,
     out->yaw_rad = euler.z;
     out->angular_rate_rad_s = f->angular_rate_rad_s;
     out->gyro_bias_rad_s = f->gyro_bias_rad_s;
-    /* Benchmark has no covariance: NaN means uncertainty is unavailable. */
-    out->attitude_std_rad = (imu_vec3f_t){NAN, NAN, NAN};
+    /* Benchmark has no covariance: flag distinguishes sentinel from sigma. */
+    out->attitude_std_rad = (imu_vec3f_t){FLT_MAX, FLT_MAX, FLT_MAX};
     out->accel_weight = accel_good ? shared_weight : 0.0f;
     out->fusion_mode = corrected &&
                        status == IMU_STATUS_OK ? IMU_FUSION_GRAVITY :
@@ -82,7 +83,8 @@ static imu_status_t fill_output(const imu_complementary_t *f,
                          IMU_STATUS_TIME_GAP : IMU_STATUS_OK;
     out->initialized = true;
     out->calibration_valid = true;
-    out->health_flags = IMU_HEALTH_HEADING_UNOBSERVABLE;
+    out->health_flags = IMU_HEALTH_HEADING_UNOBSERVABLE |
+                        IMU_HEALTH_UNCERTAINTY_UNAVAILABLE;
     if (!gyro_good) out->health_flags |= IMU_HEALTH_GYRO_DEGRADED;
     if (!accel_good) out->health_flags |= IMU_HEALTH_ACCEL_DEGRADED;
     if (status == IMU_STATUS_TIME_GAP)

@@ -2,6 +2,7 @@
 #include "imu/imu_complementary.h"
 #include "imu/imu_math.h"
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
@@ -74,9 +75,15 @@ static void test_zero_rate_stability(void)
     TEST_ASSERT((out.health_flags & IMU_HEALTH_HEADING_UNOBSERVABLE) != 0U);
     TEST_ASSERT(out.calibration_valid);
     TEST_ASSERT((out.health_flags & IMU_HEALTH_UNCALIBRATED) == 0U);
-    TEST_ASSERT(isnan(out.attitude_std_rad.x));
-    TEST_ASSERT(isnan(out.attitude_std_rad.y));
-    TEST_ASSERT(isnan(out.attitude_std_rad.z));
+    TEST_ASSERT((out.health_flags &
+                 IMU_HEALTH_UNCERTAINTY_UNAVAILABLE) != 0U);
+    TEST_ASSERT(isfinite(out.attitude_std_rad.x));
+    TEST_ASSERT(isfinite(out.attitude_std_rad.y));
+    TEST_ASSERT(isfinite(out.attitude_std_rad.z));
+    TEST_ASSERT(out.attitude_std_rad.x == FLT_MAX);
+    TEST_ASSERT(out.attitude_std_rad.y == FLT_MAX);
+    TEST_ASSERT(out.attitude_std_rad.z == FLT_MAX);
+    TEST_ASSERT(out.attitude_std_rad.x > 0.0f);
 }
 
 /* Catches a fixed nominal period or the wrong quaternion multiplication. */

@@ -1,6 +1,6 @@
 # 6 轴 IMU 姿态解算（ADXRS453 × 3 + ADXL355）
 
-这是一个 C99、`float` 的姿态解算库，面向 Zynq ZU2CG 等可提供稳定主机时钟的平台。核心算法是带陀螺仪零偏估计的 6 维误差状态 EKF（ESKF）；仓库还包含互补滤波对照、仿真测试和 CSV 回放工具。底层 SPI、FPGA 同步、驱动和板级标定存储**尚未实现**，需由应用提供。
+这是一个 C99、`float` 的姿态解算库，面向 Zynq ZU2CG 等可提供稳定主机时钟的平台。核心算法是带陀螺仪零偏估计的 6 维误差状态 EKF（ESKF）；仓库还包含互补滤波对照、仿真测试和 CSV 回放工具。`rtl/` 提供三颗 ADXRS453 的并行 SPI 采集 Verilog，默认 100 MHz / 5 MHz SPI / 485 Hz，接入和仿真见 [FPGA 采集说明](docs/adxrs453-spi.md)。加速度计 FPGA 同步与采集、处理器驱动和板级标定存储**尚未实现**，需由应用提供。
 
 **当前状态：尚未通过完整性能验收，也未在目标硬件上验证。** 最新主机测试为 15 项通过 14 项；振动叠加零偏突变场景的峰值姿态误差为 **0.182522 rad**，高于预定的 **0.174533 rad** 上限。30 个固定种子的倾角 RMS 对照为 ESKF **0.017359389 rad**、互补滤波 **0.0219991227 rad**；这个局部优势不代表全部场景达标。详细条件和结果见 [验证报告](docs/verification-report.md)。
 
@@ -49,6 +49,7 @@ CMake 目标 `imu` 是静态库，公开头文件位于 `include/imu/`。嵌入�
 ## 进一步阅读
 
 - [Zynq 集成指南](docs/integration-zynq.md)：SPI 响应流水线、SYNC/DRDY、校准、故障与发布策略。
+- [ADXRS453 FPGA 采集](docs/adxrs453-spi.md)：三路并行 SPI、启动检查、数据端口、时间戳和 Vivado 仿真。
 - [验证报告](docs/verification-report.md)：测试命令、验收门限、资源测量及尚未解决的问题。
 - [设计说明](docs/superpowers/specs/2026-09-21-imu-attitude-esekf-design.md)：算法和时序设计依据。
 
